@@ -3,11 +3,13 @@ import {
   BarChart3,
   Building2,
   ChefHat,
+  Database,
   KeyRound,
   LogOut,
   Pencil,
   Plus,
   QrCode,
+  RefreshCw,
   Smartphone,
   Users,
   UtensilsCrossed,
@@ -39,6 +41,12 @@ const NAV_ITEMS: Array<{
 
 export function Sidebar({ mobileOpen, onCloseMobile }: SidebarProps) {
   const {
+    user,
+    cloudRestaurantCount,
+    cloudSyncing,
+    handleSignIn,
+    handleSignOut,
+    syncAllToCloudDb,
     activeRole,
     activeTab,
     setActiveTab,
@@ -187,7 +195,56 @@ export function Sidebar({ mobileOpen, onCloseMobile }: SidebarProps) {
         })}
       </nav>
 
-      <div className="p-4 border-t border-slate-200 text-xs text-slate-500 space-y-2.5">
+      <div className="p-4 border-t border-slate-200 text-xs text-slate-500 space-y-3">
+        {/* Cloud Database (Firebase Firestore) Controls */}
+        <div className="rounded-lg border border-slate-200 bg-slate-50/70 p-2.5 space-y-2">
+          <div className="flex items-center justify-between gap-2">
+            <span className="inline-flex items-center gap-1.5 font-semibold text-slate-800">
+              <Database className="w-3.5 h-3.5 text-emerald-700 shrink-0" />
+              <span>Cloud Firestore</span>
+            </span>
+            {user && (
+              <button
+                type="button"
+                onClick={() => void handleSignOut()}
+                className="text-[11px] font-medium text-slate-500 hover:text-red-700"
+              >
+                Disconnect
+              </button>
+            )}
+          </div>
+
+          {user ? (
+            <>
+              <p className="text-[11px] font-mono text-slate-600 truncate" title={user.email ?? ''}>
+                {user.email}
+              </p>
+              <button
+                type="button"
+                disabled={cloudSyncing}
+                onClick={() => void syncAllToCloudDb()}
+                className="w-full inline-flex items-center justify-center gap-1.5 h-8 px-2.5 rounded-md bg-emerald-600 text-white text-xs font-semibold hover:bg-emerald-700 disabled:opacity-60 transition-colors"
+              >
+                <RefreshCw className={`w-3.5 h-3.5 ${cloudSyncing ? 'animate-spin' : ''}`} />
+                <span>
+                  {cloudSyncing
+                    ? 'Syncing...'
+                    : `Sync to Cloud (${cloudRestaurantCount})`}
+                </span>
+              </button>
+            </>
+          ) : (
+            <button
+              type="button"
+              onClick={() => void handleSignIn()}
+              className="w-full inline-flex items-center justify-center gap-1.5 h-8 px-2.5 rounded-md border border-emerald-600 bg-white text-emerald-700 text-xs font-semibold hover:bg-emerald-50 transition-colors"
+            >
+              <Database className="w-3.5 h-3.5" />
+              <span>Connect Cloud DB</span>
+            </button>
+          )}
+        </div>
+
         {portalSession && (
           <>
             <div className="flex items-center justify-between gap-2">

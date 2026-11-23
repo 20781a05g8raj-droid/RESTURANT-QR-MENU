@@ -2,11 +2,13 @@ import React, { useMemo, useState } from 'react';
 import QRCode from 'qrcode';
 import {
   ArrowUpRight,
+  Database,
   Download,
   KeyRound,
   Pencil,
   Plus,
   QrCode,
+  RefreshCw,
   Search,
   Smartphone,
   Trash2,
@@ -22,6 +24,15 @@ import {
 
 export function FleetDirectory() {
   const {
+    user,
+    cloudRestaurantCount,
+    cloudSyncing,
+    cloudSyncError,
+    cloudSyncSuccess,
+    clearCloudSyncMessages,
+    handleSignIn,
+    handleSignOut,
+    syncAllToCloudDb,
     restaurants,
     activeRestaurant,
     selectRestaurantById,
@@ -155,6 +166,94 @@ export function FleetDirectory() {
             <span>Add Restaurant</span>
           </button>
         </div>
+      </div>
+
+      {/* Cloud Firestore Database Sync Card */}
+      <div className="bg-white border border-slate-200 rounded-xl p-4 sm:p-5 space-y-3">
+        <div className="flex flex-col md:flex-row md:items-center justify-between gap-3">
+          <div className="flex items-start gap-3 min-w-0">
+            <div className="w-10 h-10 rounded-lg bg-emerald-50 border border-emerald-200 flex items-center justify-center shrink-0">
+              <Database className="w-5 h-5 text-emerald-700" />
+            </div>
+            <div className="min-w-0">
+              <h3 className="text-sm font-semibold text-slate-900">
+                {user
+                  ? 'Firebase Cloud Database (Firestore) Connected'
+                  : 'Connect Firebase Cloud Database (Firestore)'}
+              </h3>
+              <p className="text-xs text-slate-600 mt-0.5">
+                {user
+                  ? `Signed in as ${user.email}. ${cloudRestaurantCount} restaurants stored in Cloud Firestore — live changes sync automatically across devices and QR menus.`
+                  : 'Sign in with your Google admin account to save and sync all restaurants, menus, orders & staff in Cloud Firestore across all devices and Vercel.'}
+              </p>
+            </div>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-2 shrink-0">
+            {user ? (
+              <>
+                <button
+                  type="button"
+                  disabled={cloudSyncing}
+                  onClick={() => void syncAllToCloudDb()}
+                  className="inline-flex items-center gap-1.5 h-9 px-3.5 rounded-lg bg-emerald-600 text-white text-xs font-semibold hover:bg-emerald-700 disabled:opacity-60 whitespace-nowrap"
+                >
+                  <RefreshCw className={`w-3.5 h-3.5 ${cloudSyncing ? 'animate-spin' : ''}`} />
+                  <span>
+                    {cloudSyncing ? 'Syncing to Firestore...' : `Sync All (${restaurants.length}) to Cloud DB`}
+                  </span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void handleSignOut()}
+                  className="inline-flex items-center h-9 px-3 rounded-lg border border-slate-200 bg-white text-xs font-medium text-slate-700 hover:bg-slate-50 whitespace-nowrap"
+                >
+                  Disconnect
+                </button>
+              </>
+            ) : (
+              <button
+                type="button"
+                onClick={() => void handleSignIn()}
+                className="inline-flex items-center gap-1.5 h-9 px-4 rounded-lg bg-emerald-600 text-white text-xs font-semibold hover:bg-emerald-700 whitespace-nowrap"
+              >
+                <Database className="w-3.5 h-3.5" />
+                <span>Connect Cloud DB (Google)</span>
+              </button>
+            )}
+          </div>
+        </div>
+
+        {cloudSyncSuccess && (
+          <div className="px-3.5 py-2 rounded-lg bg-emerald-50 border border-emerald-200 text-xs text-emerald-800 flex items-center justify-between gap-2">
+            <span>{cloudSyncSuccess}</span>
+            <button
+              type="button"
+              onClick={clearCloudSyncMessages}
+              aria-label="Dismiss sync confirmation"
+              className="p-0.5 rounded hover:bg-emerald-100 text-emerald-700 shrink-0"
+            >
+              <X className="w-3.5 h-3.5" />
+            </button>
+          </div>
+        )}
+
+        {cloudSyncError && (
+          <div
+            role="alert"
+            className="px-3.5 py-2 rounded-lg bg-red-50 border border-red-200 text-xs text-red-700 flex items-center justify-between gap-2"
+          >
+            <span>{cloudSyncError}</span>
+            <button
+              type="button"
+              onClick={clearCloudSyncMessages}
+              aria-label="Dismiss sync error"
+              className="p-0.5 rounded hover:bg-red-100 text-red-700 shrink-0"
+            >
+              <X className="w-3.5 h-3.5" />
+            </button>
+          </div>
+        )}
       </div>
 
       {/* Platform KPI strip */}

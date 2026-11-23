@@ -66,6 +66,34 @@ test('configured APP_OWNER_PASSWORD env var overrides claimed fallback hash', ()
     assert.equal(withEnv.getStatus().usesEnvPassword, true);
     assert.equal(withEnv.login('rajensu264@gmail.com', 'ClaimedPass1').ok, false);
     assert.equal(withEnv.login('rajensu264@gmail.com', 'EnvOverridePass2').ok, true);
+
+    // Also handle accidental surrounding quotes pasted into Vercel Environment Variables UI
+    const withQuotedEnv = new AuthManager({
+      baseDir: dir,
+      env: {
+        APP_OWNER_EMAIL: '"rajensu264@gmail.com"',
+        APP_OWNER_PASSWORD: '"QuotedPass#99"',
+      },
+    });
+    assert.equal(withQuotedEnv.login('rajensu264@gmail.com', 'QuotedPass#99').ok, true);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('unconfigured deployment returns clear setup guidance without leaking owner email', () => {
+  const dir = createTempDir();
+  try {
+    const auth = new AuthManager({
+      baseDir: dir,
+      env: { APP_OWNER_EMAIL: 'rajensu264@gmail.com', APP_OWNER_PASSWORD: '' },
+    });
+    const res = auth.login('any@example.com', 'somepass');
+    assert.equal(res.ok, false);
+    if (!res.ok) {
+      assert.match(res.error, /APP_OWNER_PASSWORD/i);
+      assert.equal(res.error.includes('rajensu264@gmail.com'), false);
+    }
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }

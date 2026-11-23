@@ -141,12 +141,24 @@ export class AuthManager {
     this.store = this.loadStore();
   }
 
+  private cleanEnvValue(raw?: string): string {
+    const trimmed = (raw || '').trim();
+    if (
+      trimmed.length >= 2 &&
+      ((trimmed.startsWith('"') && trimmed.endsWith('"')) ||
+        (trimmed.startsWith("'") && trimmed.endsWith("'")))
+    ) {
+      return trimmed.slice(1, -1).trim();
+    }
+    return trimmed;
+  }
+
   private getAppOwnerEmail(): string {
-    return (this.env.APP_OWNER_EMAIL || DEFAULT_APP_OWNER_EMAIL).trim().toLowerCase();
+    return (this.cleanEnvValue(this.env.APP_OWNER_EMAIL) || DEFAULT_APP_OWNER_EMAIL).toLowerCase();
   }
 
   private getEnvAdminPassword(): string {
-    return (this.env.APP_OWNER_PASSWORD || '').trim();
+    return this.cleanEnvValue(this.env.APP_OWNER_PASSWORD);
   }
 
   private loadStore(): AuthStoreData {
@@ -252,9 +264,18 @@ export class AuthManager {
       return { ok: false, status: 400, error: 'Username and password are required.' };
     }
 
+    const envPassword = this.getEnvAdminPassword();
+    if (envPassword.length === 0 && !this.store.adminAccount) {
+      return {
+        ok: false,
+        status: 401,
+        error:
+          'App Owner password is not configured on this deployment yet. Add APP_OWNER_PASSWORD in Vercel Environment Variables and Redeploy, or click "First-time App Owner? Activate Master Account" below.',
+      };
+    }
+
     const appOwnerEmail = this.getAppOwnerEmail();
     if (normalizedUsername === appOwnerEmail) {
-      const envPassword = this.getEnvAdminPassword();
       if (envPassword.length > 0) {
         if (constantTimeEqualString(cleanPassword, envPassword)) {
           const session: PortalSessionPayload = {

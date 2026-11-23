@@ -4,12 +4,14 @@ import {
   collection,
   deleteDoc,
   doc,
+  getDoc,
   onSnapshot,
   query,
   serverTimestamp,
   setDoc,
   updateDoc,
   where,
+  writeBatch,
 } from 'firebase/firestore';
 import {
   auth,
@@ -20,6 +22,15 @@ import {
   signOutUser,
   testFirestoreConnection,
 } from '../lib/firebase';
+import {
+  buildFirestoreMenuItemFields,
+  buildFirestoreOrderFields,
+  buildFirestoreRestaurantFields,
+  buildFirestoreStaffFields,
+  formatFirebaseAuthError,
+  isSafeFirestoreId,
+  toIsoString,
+} from '../utils/firestoreHelpers';
 import {
   generateDefaultMenuForRestaurant,
   generateSeedOrders,
@@ -109,6 +120,18 @@ interface PlatformContextValue {
   user: User | null;
   authReady: boolean;
   firestoreConnected: boolean;
+  cloudRestaurantCount: number;
+  cloudSyncing: boolean;
+  cloudSyncError: string | null;
+  cloudSyncSuccess: string | null;
+  clearCloudSyncMessages: () => void;
+  syncAllToCloudDb: () => Promise<{
+    ok: boolean;
+    syncedRestaurants: number;
+    syncedMenuItems: number;
+    syncedStaff: number;
+    error?: string;
+  }>;
   activeRole: UserRole;
   setActiveRole: (role: UserRole) => void;
   activeTab: WorkspaceTab;
@@ -223,7 +246,7 @@ interface PlatformContextValue {
   toggleStaffActive: (staffId: string) => void;
   updateStaffRole: (staffId: string, role: StaffRole) => void;
   // Auth
-  handleSignIn: () => Promise<void>;
+  handleSignIn: () => Promise<{ ok: boolean; error?: string }>;
   handleSignOut: () => Promise<void>;
   // Shared TTS player (gemini-3.8-flash-tts)
   speakText: (text: string, style?: string, voiceName?: string) => Promise<void>;
@@ -371,6 +394,13 @@ export function PlatformProvider({ children }: { children: React.ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
   const [authReady, setAuthReady] = useState<boolean>(false);
   const [firestoreConnected, setFirestoreConnected] = useState<boolean>(false);
+  const [cloudRestaurantCount, setCloudRestaurantCount] = useState<number>(0);
+  const [cloudSyncing, setCloudSyncing] = useState<boolean>(false);
+  const [cloudSyncError, setCloudSyncError] = useState<string | null>(null);
+  const [cloudSyncSuccess, setCloudSyncSuccess] = useState<string | null>(null);
+  const cloudRestaurantIdsRef = useRef<Set<string>>(new Set());
+  const stateRef = useRef<PersistedState>(state);
+  stateRef.current = state;
   const [speakingText, setSpeakingText] = useState<string | null>(null);
   const [ttsError, setTtsError] = useState<string | null>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
@@ -624,17 +654,127 @@ export function PlatformProvider({ children }: { children: React.ReactNode }) {
     setGuestPreviewMode(false);
   }, []);
 
-  // Firebase Auth + Startup Connection Validation
+  // Firebase Auth + Connection Validation
   useEffect(() => {
-    testFirestoreConnection().then(setFirestoreConnected);
     const unsubscribe = onAuthStateChanged(auth, (firebaseUser) => {
       setUser(firebaseUser);
       setAuthReady(true);
+      if (firebaseUser) {
+        testFirestoreConnection().then(setFirestoreConnected);
+      } else {
+        setFirestoreConnected(false);
+        setCloudRestaurantCount(0);
+        cloudRestaurantIdsRef.current = new Set();
+      }
     });
     return () => unsubscribe();
   }, []);
 
-  // Attach real-time Firestore onSnapshot listeners ONLY when auth is ready & user is authenticated
+  // Public real-time Firestore listener for active restaurant & menu (works for QR guests without sign-in)
+  useEffect(() => {
+    if (!isSafeFirestoreId(activeRestaurantId)) return;
+
+    const restRef = doc(db, 'restaurants', activeRestaurantId);
+    const unsubActiveRest = onSnapshot(
+      restRef,
+      (snap) => {
+        if (!snap.exists()) return;
+        const data = snap.data();
+        cloudRestaurantIdsRef.current.add(snap.id);
+        setState((prev) => {
+          const existing = prev.restaurants.find((r) => r.id === snap.id);
+          const merged: Restaurant = {
+            id: snap.id,
+            slug: String(data.slug ?? existing?.slug ?? snap.id),
+            name: String(data.name ?? existing?.name ?? 'Restaurant'),
+            city: String(data.city ?? existing?.city ?? 'India'),
+            cuisine: String(data.cuisine ?? existing?.cuisine ?? 'Multi-Cuisine'),
+            ownerId: String(data.ownerId ?? existing?.ownerId ?? 'owner-cloud'),
+            ownerUsername: existing?.ownerUsername,
+            plan: (data.plan as SubscriptionPlan) ?? existing?.plan ?? 'Growth',
+            active: Boolean(data.active ?? existing?.active ?? true),
+            tableCount: Number(data.tableCount ?? existing?.tableCount ?? 12),
+            wifiSsid: String(data.wifiSsid ?? existing?.wifiSsid ?? 'Guest_WiFi'),
+            wifiPassword: String(data.wifiPassword ?? existing?.wifiPassword ?? ''),
+            wifiSecurity: (data.wifiSecurity as WifiSecurity) ?? existing?.wifiSecurity ?? 'WPA',
+            currency: (data.currency as 'INR' | 'USD') ?? existing?.currency ?? 'INR',
+            monthlyRevenue: existing?.monthlyRevenue ?? 0,
+            activeOrdersCount: existing?.activeOrdersCount ?? 0,
+            createdAt: toIsoString(data.createdAt, existing?.createdAt),
+            updatedAt: toIsoString(data.updatedAt, existing?.updatedAt),
+          };
+          const restaurants = existing
+            ? prev.restaurants.map((r) => (r.id === snap.id ? merged : r))
+            : [merged, ...prev.restaurants];
+          return { ...prev, restaurants };
+        });
+      },
+      (error) => {
+        console.warn('Public restaurant snapshot skipped:', error.message);
+      }
+    );
+
+    const menuPath = `restaurants/${activeRestaurantId}/menuItems`;
+    const menuQuery = query(
+      collection(db, menuPath),
+      where('restaurantId', '==', activeRestaurantId)
+    );
+    const unsubMenu = onSnapshot(
+      menuQuery,
+      (snap) => {
+        if (snap.empty) return;
+        setState((prev) => {
+          const localList = prev.menusByRestaurant[activeRestaurantId] ?? [];
+          const localById = new Map(localList.map((m) => [m.id, m]));
+          const cloudMenu: MenuItem[] = snap.docs.map((d) => {
+            const data = d.data();
+            const existingLocal = localById.get(d.id);
+            const cloudImg = String(data.imageUrl ?? '');
+            const keepLocalGallery =
+              existingLocal?.images &&
+              existingLocal.images.some((img) => img.startsWith('data:'));
+            return {
+              id: d.id,
+              restaurantId: activeRestaurantId,
+              name: String(data.name ?? ''),
+              description: String(data.description ?? ''),
+              category: String(data.category ?? 'Mains'),
+              price: Number(data.price ?? 0),
+              available: Boolean(data.available ?? true),
+              veg: Boolean(data.veg ?? true),
+              prepMinutes: Number(data.prepMinutes ?? 12),
+              imageUrl: keepLocalGallery && existingLocal ? existingLocal.imageUrl : cloudImg,
+              images:
+                keepLocalGallery && existingLocal?.images
+                  ? existingLocal.images
+                  : cloudImg
+                    ? [cloudImg]
+                    : undefined,
+              popular: Boolean(data.popular ?? false),
+              updatedAt: toIsoString(data.updatedAt),
+            };
+          });
+          return {
+            ...prev,
+            menusByRestaurant: {
+              ...prev.menusByRestaurant,
+              [activeRestaurantId]: cloudMenu,
+            },
+          };
+        });
+      },
+      (error) => {
+        console.warn('Public menu snapshot skipped:', menuPath, error.message);
+      }
+    );
+
+    return () => {
+      unsubActiveRest();
+      unsubMenu();
+    };
+  }, [activeRestaurantId]);
+
+  // Authenticated real-time Firestore listener for all managed restaurants
   useEffect(() => {
     if (!authReady || !user || !user.emailVerified) return;
 
@@ -647,6 +787,8 @@ export function PlatformProvider({ children }: { children: React.ReactNode }) {
     const unsubRestaurants = onSnapshot(
       restQuery,
       (snap) => {
+        setCloudRestaurantCount(snap.size);
+        cloudRestaurantIdsRef.current = new Set(snap.docs.map((d) => d.id));
         if (snap.empty) return;
         const cloudRestaurants: Restaurant[] = snap.docs.map((d) => {
           const data = d.data();
@@ -666,21 +808,39 @@ export function PlatformProvider({ children }: { children: React.ReactNode }) {
             currency: (data.currency as 'INR' | 'USD') ?? 'INR',
             monthlyRevenue: 750000,
             activeOrdersCount: 0,
-            createdAt: new Date().toISOString(),
-            updatedAt: new Date().toISOString(),
+            createdAt: toIsoString(data.createdAt),
+            updatedAt: toIsoString(data.updatedAt),
           };
         });
 
         setState((prev) => {
           const map = new Map(prev.restaurants.map((r) => [r.id, r]));
           for (const cr of cloudRestaurants) {
-            map.set(cr.id, { ...(map.get(cr.id) ?? cr), ...cr });
+            const existing = map.get(cr.id);
+            map.set(cr.id, {
+              ...(existing ?? cr),
+              ...cr,
+              ownerUsername: existing?.ownerUsername,
+              monthlyRevenue: existing?.monthlyRevenue ?? cr.monthlyRevenue,
+              activeOrdersCount: existing?.activeOrdersCount ?? cr.activeOrdersCount,
+            });
           }
-          return { ...prev, restaurants: Array.from(map.values()) };
+          const next = { ...prev, restaurants: Array.from(map.values()) };
+          try {
+            localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
+          } catch {
+            // ignore storage limits
+          }
+          return next;
         });
       },
       (error) => {
-        handleFirestoreError(error, OperationType.LIST, restCollectionPath);
+        setCloudSyncError(`Firestore read error on ${restCollectionPath}: ${error.message}`);
+        try {
+          handleFirestoreError(error, OperationType.LIST, restCollectionPath);
+        } catch {
+          // logged structured FirestoreErrorInfo
+        }
       }
     );
 
@@ -689,49 +849,143 @@ export function PlatformProvider({ children }: { children: React.ReactNode }) {
     };
   }, [authReady, user]);
 
-  // Real-time Firestore listener for active restaurant menu items when signed in
+  // Authenticated real-time Firestore listeners for active restaurant orders & staff
   useEffect(() => {
-    if (!authReady || !user || !user.emailVerified) return;
-    const menuPath = `restaurants/${activeRestaurantId}/menuItems`;
-    const menuQuery = query(
-      collection(db, menuPath),
-      where('restaurantId', '==', activeRestaurantId)
-    );
-    const unsubMenu = onSnapshot(
-      menuQuery,
+    if (!authReady || !user || !user.emailVerified || !isSafeFirestoreId(activeRestaurantId)) {
+      return;
+    }
+
+    const isBootstrappedAdmin = user.email === '20781a05g8raj@gmail.com';
+    const ordersPath = `restaurants/${activeRestaurantId}/orders`;
+    const staffPath = `restaurants/${activeRestaurantId}/staff`;
+
+    const ordersQuery = isBootstrappedAdmin
+      ? query(collection(db, ordersPath))
+      : query(collection(db, ordersPath), where('restaurantOwnerId', '==', user.uid));
+
+    const staffQuery = isBootstrappedAdmin
+      ? query(collection(db, staffPath))
+      : query(collection(db, staffPath), where('restaurantOwnerId', '==', user.uid));
+
+    const unsubOrders = onSnapshot(
+      ordersQuery,
       (snap) => {
         if (snap.empty) return;
-        const cloudMenu: MenuItem[] = snap.docs.map((d) => {
-          const data = d.data();
-          return {
-            id: d.id,
-            restaurantId: activeRestaurantId,
-            name: String(data.name ?? ''),
-            description: String(data.description ?? ''),
-            category: String(data.category ?? 'Mains'),
-            price: Number(data.price ?? 0),
-            available: Boolean(data.available ?? true),
-            veg: Boolean(data.veg ?? true),
-            prepMinutes: Number(data.prepMinutes ?? 12),
-            imageUrl: String(data.imageUrl ?? ''),
-            popular: Boolean(data.popular ?? false),
-            updatedAt: new Date().toISOString(),
-          };
-        });
+        const cloudOrders: Order[] = snap.docs
+          .map((d) => {
+            const data = d.data();
+            return {
+              id: d.id,
+              restaurantId: activeRestaurantId,
+              restaurantOwnerId: String(data.restaurantOwnerId ?? user.uid),
+              orderNumber: String(data.orderNumber ?? 'ORD-000'),
+              tableNumber: Number(data.tableNumber ?? 1),
+              customerName: String(data.customerName ?? 'Guest'),
+              customerUid: String(data.customerUid ?? user.uid),
+              items: Array.isArray(data.items) ? (data.items as OrderItem[]) : [],
+              totalAmount: Number(data.totalAmount ?? 0),
+              status: (data.status as OrderStatus) ?? 'pending',
+              source: (data.source as OrderSource) ?? 'qr',
+              notes: String(data.notes ?? ''),
+              createdAt: toIsoString(data.createdAt),
+              updatedAt: toIsoString(data.updatedAt),
+            };
+          })
+          .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+
         setState((prev) => ({
           ...prev,
-          menusByRestaurant: {
-            ...prev.menusByRestaurant,
-            [activeRestaurantId]: cloudMenu,
+          ordersByRestaurant: {
+            ...prev.ordersByRestaurant,
+            [activeRestaurantId]: cloudOrders,
           },
         }));
       },
       (error) => {
-        handleFirestoreError(error, OperationType.LIST, menuPath);
+        try {
+          handleFirestoreError(error, OperationType.LIST, ordersPath);
+        } catch {
+          // logged structured FirestoreErrorInfo
+        }
       }
     );
-    return () => unsubMenu();
+
+    const unsubStaff = onSnapshot(
+      staffQuery,
+      (snap) => {
+        if (snap.empty) return;
+        const cloudStaff: StaffMember[] = snap.docs.map((d) => {
+          const data = d.data();
+          return {
+            id: d.id,
+            restaurantId: activeRestaurantId,
+            restaurantOwnerId: String(data.restaurantOwnerId ?? user.uid),
+            userId: String(data.userId ?? d.id),
+            name: String(data.name ?? 'Team Member'),
+            email: String(data.email ?? ''),
+            role: (data.role as StaffRole) ?? 'waiter',
+            active: Boolean(data.active ?? true),
+            createdAt: toIsoString(data.createdAt),
+            updatedAt: toIsoString(data.updatedAt),
+          };
+        });
+
+        setState((prev) => ({
+          ...prev,
+          staffByRestaurant: {
+            ...prev.staffByRestaurant,
+            [activeRestaurantId]: cloudStaff,
+          },
+        }));
+      },
+      (error) => {
+        try {
+          handleFirestoreError(error, OperationType.LIST, staffPath);
+        } catch {
+          // logged structured FirestoreErrorInfo
+        }
+      }
+    );
+
+    return () => {
+      unsubOrders();
+      unsubStaff();
+    };
   }, [authReady, user, activeRestaurantId]);
+
+  const ensureRestaurantInFirestore = useCallback(
+    async (restaurant: Restaurant): Promise<string | null> => {
+      if (!user || !user.emailVerified || !isSafeFirestoreId(restaurant.id)) return null;
+      const restRef = doc(db, 'restaurants', restaurant.id);
+      const snap = await getDoc(restRef);
+      if (snap.exists()) {
+        cloudRestaurantIdsRef.current.add(restaurant.id);
+        return String(snap.data().ownerId ?? user.uid);
+      }
+      const fields = buildFirestoreRestaurantFields(restaurant, user.uid);
+      await setDoc(restRef, {
+        ...fields,
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      });
+      cloudRestaurantIdsRef.current.add(restaurant.id);
+      return user.uid;
+    },
+    [user]
+  );
+
+  const reportCloudWriteError = useCallback(
+    (error: unknown, op: OperationType, path: string) => {
+      const msg = error instanceof Error ? error.message : String(error);
+      setCloudSyncError(`Cloud Firestore sync failed (${path}): ${msg}`);
+      try {
+        handleFirestoreError(error, op, path);
+      } catch {
+        // structured Firestore error logged to console
+      }
+    },
+    []
+  );
 
   const activeRestaurant = useMemo(() => {
     return (
@@ -895,33 +1149,43 @@ export function PlatformProvider({ children }: { children: React.ReactNode }) {
         staffByRestaurant: { ...prev.staffByRestaurant, [id]: defaultStaff },
       }));
 
-      // Sync to Firestore if signed in with verified account
+      // Sync new restaurant + default menu + staff to Firestore when signed in
       if (user && user.emailVerified) {
         const docPath = `restaurants/${id}`;
-        setDoc(doc(db, 'restaurants', id), {
-          slug: newRest.slug,
-          name: newRest.name,
-          city: newRest.city,
-          cuisine: newRest.cuisine,
-          ownerId: user.uid,
-          plan: newRest.plan,
-          active: newRest.active,
-          tableCount: newRest.tableCount,
-          wifiSsid: newRest.wifiSsid,
-          wifiPassword: newRest.wifiPassword,
-          wifiSecurity: newRest.wifiSecurity,
-          currency: newRest.currency,
-          createdAt: serverTimestamp(),
-          updatedAt: serverTimestamp(),
-        }).catch((err) => {
-          console.warn('Firestore restaurant sync skipped:', docPath, err);
-        });
+        const restPayload = buildFirestoreRestaurantFields(newRest, user.uid);
+        void (async () => {
+          try {
+            await setDoc(doc(db, 'restaurants', id), {
+              ...restPayload,
+              createdAt: serverTimestamp(),
+              updatedAt: serverTimestamp(),
+            });
+            cloudRestaurantIdsRef.current.add(id);
+            const batch = writeBatch(db);
+            for (const item of defaultMenu) {
+              batch.set(doc(db, 'restaurants', id, 'menuItems', item.id), {
+                ...buildFirestoreMenuItemFields(item, id),
+                updatedAt: serverTimestamp(),
+              });
+            }
+            for (const member of defaultStaff) {
+              batch.set(doc(db, 'restaurants', id, 'staff', member.id), {
+                ...buildFirestoreStaffFields(member, id, user.uid),
+                createdAt: serverTimestamp(),
+                updatedAt: serverTimestamp(),
+              });
+            }
+            await batch.commit();
+          } catch (err) {
+            reportCloudWriteError(err, OperationType.CREATE, docPath);
+          }
+        })();
       }
 
       setActiveRestaurantId(id);
       return { ok: true, restaurant: newRest };
     },
-    [authToken, commitState, portalSession, user]
+    [authToken, commitState, portalSession, reportCloudWriteError, user]
   );
 
   const updateRestaurant = useCallback(
@@ -1005,25 +1269,42 @@ export function PlatformProvider({ children }: { children: React.ReactNode }) {
       }));
 
       if (user && user.emailVerified) {
-        updateDoc(doc(db, 'restaurants', restaurantId), {
-          name: updates.name.trim(),
-          city: updates.city.trim(),
-          cuisine: updates.cuisine.trim(),
-          plan: updates.plan,
-          active: updates.active,
-          tableCount: updates.tableCount,
-          wifiSsid: updates.wifiSsid.trim(),
-          wifiPassword: updates.wifiPassword,
-          wifiSecurity: updates.wifiSecurity,
-          updatedAt: serverTimestamp(),
-        }).catch(() => {
-          // Seed outlets may not exist in Firestore yet
-        });
+        const docPath = `restaurants/${restaurantId}`;
+        const existingLocal = stateRef.current.restaurants.find((r) => r.id === restaurantId);
+        void (async () => {
+          try {
+            const restRef = doc(db, 'restaurants', restaurantId);
+            const snap = await getDoc(restRef);
+            if (snap.exists()) {
+              await updateDoc(restRef, {
+                name: updates.name.trim(),
+                city: updates.city.trim(),
+                cuisine: updates.cuisine.trim(),
+                plan: updates.plan,
+                active: updates.active,
+                tableCount: updates.tableCount,
+                wifiSsid: updates.wifiSsid.trim(),
+                wifiPassword: updates.wifiPassword,
+                wifiSecurity: updates.wifiSecurity,
+                updatedAt: serverTimestamp(),
+              });
+            } else if (existingLocal) {
+              await setDoc(restRef, {
+                ...buildFirestoreRestaurantFields({ ...existingLocal, ...updates }, user.uid),
+                createdAt: serverTimestamp(),
+                updatedAt: serverTimestamp(),
+              });
+              cloudRestaurantIdsRef.current.add(restaurantId);
+            }
+          } catch (err) {
+            reportCloudWriteError(err, OperationType.UPDATE, docPath);
+          }
+        })();
       }
 
       return { ok: true };
     },
-    [authToken, commitState, portalSession, user]
+    [authToken, commitState, portalSession, reportCloudWriteError, user]
   );
 
   const deleteRestaurant = useCallback(
@@ -1071,14 +1352,23 @@ export function PlatformProvider({ children }: { children: React.ReactNode }) {
       }
 
       if (user && user.emailVerified) {
-        deleteDoc(doc(db, 'restaurants', restaurantId)).catch(() => {
-          // ignore if local-only
+        const docPath = `restaurants/${restaurantId}`;
+        deleteDoc(doc(db, 'restaurants', restaurantId)).catch((err) => {
+          reportCloudWriteError(err, OperationType.DELETE, docPath);
         });
       }
 
       return { ok: true };
     },
-    [activeRestaurantId, authToken, commitState, portalSession, state.restaurants, user]
+    [
+      activeRestaurantId,
+      authToken,
+      commitState,
+      portalSession,
+      reportCloudWriteError,
+      state.restaurants,
+      user,
+    ]
   );
 
   const updateRestaurantWifi = useCallback(
@@ -1100,32 +1390,48 @@ export function PlatformProvider({ children }: { children: React.ReactNode }) {
       }));
 
       if (user && user.emailVerified) {
-        updateDoc(doc(db, 'restaurants', restaurantId), {
-          wifiSsid: wifi.wifiSsid,
-          wifiPassword: wifi.wifiPassword,
-          wifiSecurity: wifi.wifiSecurity,
-          tableCount: wifi.tableCount,
-          updatedAt: serverTimestamp(),
-        }).catch(() => {
-          // Local seed restaurants may not exist in cloud until created
-        });
+        const docPath = `restaurants/${restaurantId}`;
+        const existingLocal = stateRef.current.restaurants.find((r) => r.id === restaurantId);
+        void (async () => {
+          try {
+            const restRef = doc(db, 'restaurants', restaurantId);
+            const snap = await getDoc(restRef);
+            if (snap.exists()) {
+              await updateDoc(restRef, {
+                wifiSsid: wifi.wifiSsid,
+                wifiPassword: wifi.wifiPassword,
+                wifiSecurity: wifi.wifiSecurity,
+                tableCount: wifi.tableCount,
+                updatedAt: serverTimestamp(),
+              });
+            } else if (existingLocal) {
+              await setDoc(restRef, {
+                ...buildFirestoreRestaurantFields({ ...existingLocal, ...wifi }, user.uid),
+                createdAt: serverTimestamp(),
+                updatedAt: serverTimestamp(),
+              });
+            }
+          } catch (err) {
+            reportCloudWriteError(err, OperationType.UPDATE, docPath);
+          }
+        })();
       }
     },
-    [commitState, user]
+    [commitState, reportCloudWriteError, user]
   );
 
   const toggleMenuItemAvailability = useCallback(
     (itemId: string) => {
       const now = new Date().toISOString();
       const restId = activeRestaurant.id;
-      let nextAvailable = true;
+      let nextItem: MenuItem | null = null;
 
       commitState((prev) => {
         const list = prev.menusByRestaurant[restId] ?? generateDefaultMenuForRestaurant(restId);
         const updated = list.map((item) => {
           if (item.id === itemId) {
-            nextAvailable = !item.available;
-            return { ...item, available: nextAvailable, updatedAt: now };
+            nextItem = { ...item, available: !item.available, updatedAt: now };
+            return nextItem;
           }
           return item;
         });
@@ -1135,14 +1441,23 @@ export function PlatformProvider({ children }: { children: React.ReactNode }) {
         };
       });
 
-      if (user && user.emailVerified) {
-        updateDoc(doc(db, 'restaurants', restId, 'menuItems', itemId), {
-          available: nextAvailable,
-          updatedAt: serverTimestamp(),
-        }).catch(() => {});
+      if (user && user.emailVerified && nextItem) {
+        const itemToSync = nextItem as MenuItem;
+        const itemPath = `restaurants/${restId}/menuItems/${itemId}`;
+        void (async () => {
+          try {
+            await ensureRestaurantInFirestore(activeRestaurant);
+            await setDoc(doc(db, 'restaurants', restId, 'menuItems', itemId), {
+              ...buildFirestoreMenuItemFields(itemToSync, restId),
+              updatedAt: serverTimestamp(),
+            });
+          } catch (err) {
+            reportCloudWriteError(err, OperationType.UPDATE, itemPath);
+          }
+        })();
       }
     },
-    [activeRestaurant.id, commitState, user]
+    [activeRestaurant, commitState, ensureRestaurantInFirestore, reportCloudWriteError, user]
   );
 
   const updateMenuItemPrice = useCallback(
@@ -1151,26 +1466,40 @@ export function PlatformProvider({ children }: { children: React.ReactNode }) {
       const now = new Date().toISOString();
       const restId = activeRestaurant.id;
       const roundedPrice = Math.round(newPrice);
+      let nextItem: MenuItem | null = null;
 
       commitState((prev) => {
         const list = prev.menusByRestaurant[restId] ?? generateDefaultMenuForRestaurant(restId);
-        const updated = list.map((item) =>
-          item.id === itemId ? { ...item, price: roundedPrice, updatedAt: now } : item
-        );
+        const updated = list.map((item) => {
+          if (item.id === itemId) {
+            nextItem = { ...item, price: roundedPrice, updatedAt: now };
+            return nextItem;
+          }
+          return item;
+        });
         return {
           ...prev,
           menusByRestaurant: { ...prev.menusByRestaurant, [restId]: updated },
         };
       });
 
-      if (user && user.emailVerified) {
-        updateDoc(doc(db, 'restaurants', restId, 'menuItems', itemId), {
-          price: roundedPrice,
-          updatedAt: serverTimestamp(),
-        }).catch(() => {});
+      if (user && user.emailVerified && nextItem) {
+        const itemToSync = nextItem as MenuItem;
+        const itemPath = `restaurants/${restId}/menuItems/${itemId}`;
+        void (async () => {
+          try {
+            await ensureRestaurantInFirestore(activeRestaurant);
+            await setDoc(doc(db, 'restaurants', restId, 'menuItems', itemId), {
+              ...buildFirestoreMenuItemFields(itemToSync, restId),
+              updatedAt: serverTimestamp(),
+            });
+          } catch (err) {
+            reportCloudWriteError(err, OperationType.UPDATE, itemPath);
+          }
+        })();
       }
     },
-    [activeRestaurant.id, commitState, user]
+    [activeRestaurant, commitState, ensureRestaurantInFirestore, reportCloudWriteError, user]
   );
 
   const addMenuItem = useCallback(
@@ -1214,24 +1543,23 @@ export function PlatformProvider({ children }: { children: React.ReactNode }) {
       });
 
       if (user && user.emailVerified) {
-        setDoc(doc(db, 'restaurants', restId, 'menuItems', newItem.id), {
-          restaurantId: restId,
-          name: newItem.name,
-          description: newItem.description,
-          category: newItem.category,
-          price: newItem.price,
-          available: newItem.available,
-          veg: newItem.veg,
-          prepMinutes: newItem.prepMinutes,
-          imageUrl: newItem.imageUrl,
-          popular: newItem.popular,
-          updatedAt: serverTimestamp(),
-        }).catch(() => {});
+        const itemPath = `restaurants/${restId}/menuItems/${newItem.id}`;
+        void (async () => {
+          try {
+            await ensureRestaurantInFirestore(activeRestaurant);
+            await setDoc(doc(db, 'restaurants', restId, 'menuItems', newItem.id), {
+              ...buildFirestoreMenuItemFields(newItem, restId),
+              updatedAt: serverTimestamp(),
+            });
+          } catch (err) {
+            reportCloudWriteError(err, OperationType.CREATE, itemPath);
+          }
+        })();
       }
 
       return newItem;
     },
-    [activeRestaurant.id, commitState, user]
+    [activeRestaurant, commitState, ensureRestaurantInFirestore, reportCloudWriteError, user]
   );
 
   const updateMenuItem = useCallback(
@@ -1254,45 +1582,51 @@ export function PlatformProvider({ children }: { children: React.ReactNode }) {
       const gallery = normalizeDishImages(updates.images, updates.imageUrl);
       const primaryImage = gallery[0] ?? updates.imageUrl;
       const roundedPrice = Math.round(updates.price);
+      let updatedItem: MenuItem | null = null;
 
       commitState((prev) => {
         const list = prev.menusByRestaurant[restId] ?? generateDefaultMenuForRestaurant(restId);
-        const updated = list.map((item) =>
-          item.id === itemId
-            ? {
-                ...item,
-                name: updates.name.trim(),
-                description: updates.description.trim(),
-                category: updates.category.trim(),
-                price: roundedPrice,
-                veg: updates.veg,
-                prepMinutes: updates.prepMinutes,
-                imageUrl: primaryImage,
-                images: gallery,
-                updatedAt: now,
-              }
-            : item
-        );
+        const updated = list.map((item) => {
+          if (item.id === itemId) {
+            updatedItem = {
+              ...item,
+              name: updates.name.trim(),
+              description: updates.description.trim(),
+              category: updates.category.trim(),
+              price: roundedPrice,
+              veg: updates.veg,
+              prepMinutes: updates.prepMinutes,
+              imageUrl: primaryImage,
+              images: gallery,
+              updatedAt: now,
+            };
+            return updatedItem;
+          }
+          return item;
+        });
         return {
           ...prev,
           menusByRestaurant: { ...prev.menusByRestaurant, [restId]: updated },
         };
       });
 
-      if (user && user.emailVerified) {
-        updateDoc(doc(db, 'restaurants', restId, 'menuItems', itemId), {
-          name: updates.name.trim(),
-          description: updates.description.trim(),
-          category: updates.category.trim(),
-          price: roundedPrice,
-          veg: updates.veg,
-          prepMinutes: updates.prepMinutes,
-          imageUrl: primaryImage,
-          updatedAt: serverTimestamp(),
-        }).catch(() => {});
+      if (user && user.emailVerified && updatedItem) {
+        const itemToSync = updatedItem as MenuItem;
+        const itemPath = `restaurants/${restId}/menuItems/${itemId}`;
+        void (async () => {
+          try {
+            await ensureRestaurantInFirestore(activeRestaurant);
+            await setDoc(doc(db, 'restaurants', restId, 'menuItems', itemId), {
+              ...buildFirestoreMenuItemFields(itemToSync, restId),
+              updatedAt: serverTimestamp(),
+            });
+          } catch (err) {
+            reportCloudWriteError(err, OperationType.UPDATE, itemPath);
+          }
+        })();
       }
     },
-    [activeRestaurant.id, commitState, user]
+    [activeRestaurant, commitState, ensureRestaurantInFirestore, reportCloudWriteError, user]
   );
 
   const deleteMenuItem = useCallback(
@@ -1308,8 +1642,15 @@ export function PlatformProvider({ children }: { children: React.ReactNode }) {
           },
         };
       });
+
+      if (user && user.emailVerified) {
+        const itemPath = `restaurants/${restId}/menuItems/${itemId}`;
+        deleteDoc(doc(db, 'restaurants', restId, 'menuItems', itemId)).catch((err) => {
+          reportCloudWriteError(err, OperationType.DELETE, itemPath);
+        });
+      }
     },
-    [activeRestaurant.id, commitState]
+    [activeRestaurant.id, commitState, reportCloudWriteError, user]
   );
 
   const placeOrder = useCallback(
@@ -1365,26 +1706,24 @@ export function PlatformProvider({ children }: { children: React.ReactNode }) {
       });
 
       if (user && user.emailVerified) {
-        setDoc(doc(db, 'restaurants', restId, 'orders', newOrder.id), {
-          restaurantId: restId,
-          restaurantOwnerId: activeRestaurant.ownerId,
-          orderNumber: newOrder.orderNumber,
-          tableNumber: newOrder.tableNumber,
-          customerName: newOrder.customerName,
-          customerUid: user.uid,
-          items: newOrder.items,
-          totalAmount: newOrder.totalAmount,
-          status: 'pending',
-          source: newOrder.source,
-          notes: newOrder.notes,
-          createdAt: serverTimestamp(),
-          updatedAt: serverTimestamp(),
-        }).catch(() => {});
+        const orderPath = `restaurants/${restId}/orders/${newOrder.id}`;
+        void (async () => {
+          try {
+            const parentOwnerId = (await ensureRestaurantInFirestore(activeRestaurant)) ?? user.uid;
+            await setDoc(doc(db, 'restaurants', restId, 'orders', newOrder.id), {
+              ...buildFirestoreOrderFields(newOrder, restId, parentOwnerId, user.uid),
+              createdAt: serverTimestamp(),
+              updatedAt: serverTimestamp(),
+            });
+          } catch (err) {
+            reportCloudWriteError(err, OperationType.CREATE, orderPath);
+          }
+        })();
       }
 
       return newOrder;
     },
-    [activeRestaurant, commitState, user]
+    [activeRestaurant, commitState, ensureRestaurantInFirestore, reportCloudWriteError, user]
   );
 
   const updateOrderStatus = useCallback(
@@ -1416,13 +1755,24 @@ export function PlatformProvider({ children }: { children: React.ReactNode }) {
       });
 
       if (user && user.emailVerified) {
-        updateDoc(doc(db, 'restaurants', restId, 'orders', orderId), {
-          status: nextStatus,
-          updatedAt: serverTimestamp(),
-        }).catch(() => {});
+        const orderPath = `restaurants/${restId}/orders/${orderId}`;
+        void (async () => {
+          try {
+            const orderRef = doc(db, 'restaurants', restId, 'orders', orderId);
+            const snap = await getDoc(orderRef);
+            if (snap.exists()) {
+              await updateDoc(orderRef, {
+                status: nextStatus,
+                updatedAt: serverTimestamp(),
+              });
+            }
+          } catch (err) {
+            reportCloudWriteError(err, OperationType.UPDATE, orderPath);
+          }
+        })();
       }
     },
-    [activeRestaurant, commitState, user]
+    [activeRestaurant, commitState, reportCloudWriteError, user]
   );
 
   const addStaffMember = useCallback(
@@ -1450,60 +1800,254 @@ export function PlatformProvider({ children }: { children: React.ReactNode }) {
         };
       });
 
+      if (user && user.emailVerified) {
+        const staffPath = `restaurants/${restId}/staff/${newStaff.id}`;
+        void (async () => {
+          try {
+            const parentOwnerId = (await ensureRestaurantInFirestore(activeRestaurant)) ?? user.uid;
+            await setDoc(doc(db, 'restaurants', restId, 'staff', newStaff.id), {
+              ...buildFirestoreStaffFields(newStaff, restId, parentOwnerId),
+              createdAt: serverTimestamp(),
+              updatedAt: serverTimestamp(),
+            });
+          } catch (err) {
+            reportCloudWriteError(err, OperationType.CREATE, staffPath);
+          }
+        })();
+      }
+
       return newStaff;
     },
-    [activeRestaurant, commitState]
+    [activeRestaurant, commitState, ensureRestaurantInFirestore, reportCloudWriteError, user]
   );
 
   const toggleStaffActive = useCallback(
     (staffId: string) => {
       const now = new Date().toISOString();
       const restId = activeRestaurant.id;
+      let updatedMember: StaffMember | null = null;
       commitState((prev) => {
         const list = prev.staffByRestaurant[restId] ?? generateSeedStaff(activeRestaurant);
         return {
           ...prev,
           staffByRestaurant: {
             ...prev.staffByRestaurant,
-            [restId]: list.map((s) =>
-              s.id === staffId ? { ...s, active: !s.active, updatedAt: now } : s
-            ),
+            [restId]: list.map((s) => {
+              if (s.id === staffId) {
+                updatedMember = { ...s, active: !s.active, updatedAt: now };
+                return updatedMember;
+              }
+              return s;
+            }),
           },
         };
       });
+
+      if (user && user.emailVerified && updatedMember) {
+        const memberToSync = updatedMember as StaffMember;
+        const staffPath = `restaurants/${restId}/staff/${staffId}`;
+        void (async () => {
+          try {
+            const parentOwnerId = (await ensureRestaurantInFirestore(activeRestaurant)) ?? user.uid;
+            const staffRef = doc(db, 'restaurants', restId, 'staff', staffId);
+            const snap = await getDoc(staffRef);
+            if (snap.exists()) {
+              await updateDoc(staffRef, {
+                active: memberToSync.active,
+                updatedAt: serverTimestamp(),
+              });
+            } else {
+              await setDoc(staffRef, {
+                ...buildFirestoreStaffFields(memberToSync, restId, parentOwnerId),
+                createdAt: serverTimestamp(),
+                updatedAt: serverTimestamp(),
+              });
+            }
+          } catch (err) {
+            reportCloudWriteError(err, OperationType.UPDATE, staffPath);
+          }
+        })();
+      }
     },
-    [activeRestaurant, commitState]
+    [activeRestaurant, commitState, ensureRestaurantInFirestore, reportCloudWriteError, user]
   );
 
   const updateStaffRole = useCallback(
     (staffId: string, role: StaffRole) => {
       const now = new Date().toISOString();
       const restId = activeRestaurant.id;
+      let updatedMember: StaffMember | null = null;
       commitState((prev) => {
         const list = prev.staffByRestaurant[restId] ?? generateSeedStaff(activeRestaurant);
         return {
           ...prev,
           staffByRestaurant: {
             ...prev.staffByRestaurant,
-            [restId]: list.map((s) =>
-              s.id === staffId ? { ...s, role, updatedAt: now } : s
-            ),
+            [restId]: list.map((s) => {
+              if (s.id === staffId) {
+                updatedMember = { ...s, role, updatedAt: now };
+                return updatedMember;
+              }
+              return s;
+            }),
           },
         };
       });
+
+      if (user && user.emailVerified && updatedMember) {
+        const memberToSync = updatedMember as StaffMember;
+        const staffPath = `restaurants/${restId}/staff/${staffId}`;
+        void (async () => {
+          try {
+            const parentOwnerId = (await ensureRestaurantInFirestore(activeRestaurant)) ?? user.uid;
+            const staffRef = doc(db, 'restaurants', restId, 'staff', staffId);
+            const snap = await getDoc(staffRef);
+            if (snap.exists()) {
+              await updateDoc(staffRef, {
+                role: memberToSync.role,
+                updatedAt: serverTimestamp(),
+              });
+            } else {
+              await setDoc(staffRef, {
+                ...buildFirestoreStaffFields(memberToSync, restId, parentOwnerId),
+                createdAt: serverTimestamp(),
+                updatedAt: serverTimestamp(),
+              });
+            }
+          } catch (err) {
+            reportCloudWriteError(err, OperationType.UPDATE, staffPath);
+          }
+        })();
+      }
     },
-    [activeRestaurant, commitState]
+    [activeRestaurant, commitState, ensureRestaurantInFirestore, reportCloudWriteError, user]
   );
 
-  const handleSignIn = useCallback(async () => {
+  const syncAllToCloudDb = useCallback(async () => {
+    if (!user || !user.emailVerified) {
+      const msg = 'Please connect your Google account first to sync with Cloud Firestore.';
+      setCloudSyncError(msg);
+      return { ok: false, syncedRestaurants: 0, syncedMenuItems: 0, syncedStaff: 0, error: msg };
+    }
+
+    setCloudSyncing(true);
+    setCloudSyncError(null);
+    setCloudSyncSuccess(null);
+
     try {
-      await signInWithGoogle();
+      const snapshot = stateRef.current;
+      let syncedRestaurants = 0;
+      let syncedMenuItems = 0;
+      let syncedStaff = 0;
+
+      for (const rest of snapshot.restaurants) {
+        if (!isSafeFirestoreId(rest.id)) continue;
+        const restRef = doc(db, 'restaurants', rest.id);
+        const existingSnap = await getDoc(restRef);
+        let parentOwnerId = user.uid;
+
+        if (existingSnap.exists()) {
+          parentOwnerId = String(existingSnap.data().ownerId ?? user.uid);
+          const fields = buildFirestoreRestaurantFields(rest, parentOwnerId);
+          await updateDoc(restRef, {
+            name: fields.name,
+            city: fields.city,
+            cuisine: fields.cuisine,
+            plan: fields.plan,
+            active: fields.active,
+            tableCount: fields.tableCount,
+            wifiSsid: fields.wifiSsid,
+            wifiPassword: fields.wifiPassword,
+            wifiSecurity: fields.wifiSecurity,
+            currency: fields.currency,
+            updatedAt: serverTimestamp(),
+          });
+        } else {
+          const fields = buildFirestoreRestaurantFields(rest, user.uid);
+          await setDoc(restRef, {
+            ...fields,
+            createdAt: serverTimestamp(),
+            updatedAt: serverTimestamp(),
+          });
+        }
+        cloudRestaurantIdsRef.current.add(rest.id);
+        syncedRestaurants += 1;
+
+        const menu = snapshot.menusByRestaurant[rest.id] ?? generateDefaultMenuForRestaurant(rest.id);
+        const staff = snapshot.staffByRestaurant[rest.id] ?? generateSeedStaff(rest);
+
+        // Batch menu items (safe setDoc: no createdAt immutability constraint)
+        const menuBatch = writeBatch(db);
+        for (const item of menu) {
+          if (!isSafeFirestoreId(item.id)) continue;
+          menuBatch.set(doc(db, 'restaurants', rest.id, 'menuItems', item.id), {
+            ...buildFirestoreMenuItemFields(item, rest.id),
+            updatedAt: serverTimestamp(),
+          });
+          syncedMenuItems += 1;
+        }
+        if (menu.length > 0) {
+          await menuBatch.commit();
+        }
+
+        // Sync staff docs (preserve createdAt on updates)
+        for (const member of staff) {
+          if (!isSafeFirestoreId(member.id)) continue;
+          const staffRef = doc(db, 'restaurants', rest.id, 'staff', member.id);
+          const staffSnap = await getDoc(staffRef);
+          if (staffSnap.exists()) {
+            await updateDoc(staffRef, {
+              name: member.name.trim(),
+              role: member.role,
+              active: member.active,
+              updatedAt: serverTimestamp(),
+            });
+          } else {
+            await setDoc(staffRef, {
+              ...buildFirestoreStaffFields(member, rest.id, parentOwnerId),
+              createdAt: serverTimestamp(),
+              updatedAt: serverTimestamp(),
+            });
+          }
+          syncedStaff += 1;
+        }
+      }
+
+      const summary = `Synced ${syncedRestaurants} restaurants, ${syncedMenuItems} menu items & ${syncedStaff} staff to Cloud Firestore.`;
+      setCloudSyncSuccess(summary);
+      return { ok: true, syncedRestaurants, syncedMenuItems, syncedStaff };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Cloud Firestore sync failed.';
+      reportCloudWriteError(err, OperationType.WRITE, 'restaurants');
+      return { ok: false, syncedRestaurants: 0, syncedMenuItems: 0, syncedStaff: 0, error: msg };
+    } finally {
+      setCloudSyncing(false);
+    }
+  }, [reportCloudWriteError, user]);
+
+  const handleSignIn = useCallback(async (): Promise<{ ok: boolean; error?: string }> => {
+    setCloudSyncError(null);
+    setCloudSyncSuccess(null);
+    try {
+      const result = await signInWithGoogle();
+      if (result.user) {
+        const connected = await testFirestoreConnection();
+        setFirestoreConnected(connected);
+        setCloudSyncSuccess(`Connected to Firebase Cloud Firestore as ${result.user.email ?? 'Google User'}.`);
+      }
+      return { ok: true };
     } catch (error) {
+      const host = typeof window !== 'undefined' ? window.location.host : undefined;
+      const friendly = formatFirebaseAuthError(error, host);
+      setCloudSyncError(friendly);
       console.error('Google Sign-In failed:', error);
+      return { ok: false, error: friendly };
     }
   }, []);
 
   const handleSignOut = useCallback(async () => {
+    setCloudSyncError(null);
+    setCloudSyncSuccess(null);
     try {
       await signOutUser();
     } catch (error) {
@@ -1547,6 +2091,15 @@ export function PlatformProvider({ children }: { children: React.ReactNode }) {
     user,
     authReady,
     firestoreConnected,
+    cloudRestaurantCount,
+    cloudSyncing,
+    cloudSyncError,
+    cloudSyncSuccess,
+    clearCloudSyncMessages: () => {
+      setCloudSyncError(null);
+      setCloudSyncSuccess(null);
+    },
+    syncAllToCloudDb,
     activeRole,
     setActiveRole,
     activeTab,
