@@ -151,6 +151,25 @@ service cloud.firestore {
       data.updatedAt is timestamp;
     }
 
+    // Pillar 6: Zero-PII public live status tracker document
+    function isValidOrderStatus(data, restaurantId) {
+      return data.keys().hasAll([
+        'restaurantId', 'restaurantOwnerId', 'orderNumber', 'tableNumber',
+        'status', 'updatedAt'
+      ]) &&
+      data.keys().hasOnly([
+        'restaurantId', 'restaurantOwnerId', 'orderNumber', 'tableNumber',
+        'status', 'updatedAt'
+      ]) &&
+      isValidId(data.restaurantId) &&
+      data.restaurantId == restaurantId &&
+      isValidId(data.restaurantOwnerId) &&
+      data.orderNumber is string && data.orderNumber.size() >= 2 && data.orderNumber.size() <= 32 &&
+      data.tableNumber is int && data.tableNumber >= 1 && data.tableNumber <= 250 &&
+      data.status in ['pending', 'preparing', 'ready', 'served', 'cancelled'] &&
+      data.updatedAt is timestamp;
+    }
+
     function isValidStaffMember(data, restaurantId) {
       return data.keys().hasAll([
         'restaurantId', 'restaurantOwnerId', 'userId', 'name', 'email',
@@ -302,6 +321,51 @@ service cloud.firestore {
           incoming().restaurantOwnerId == existing().restaurantOwnerId &&
           incoming().customerUid == existing().customerUid &&
           incoming().createdAt == existing().createdAt &&
+          incoming().updatedAt == request.time &&
+          restaurantExists(restaurantId) && (
+            isAdmin() ||
+            (
+              !(existing().status in ['served', 'cancelled']) &&
+              (isRestaurantOwner(restaurantId) || isRestaurantStaff(restaurantId)) &&
+              incoming().diff(existing()).affectedKeys().hasOnly(['status', 'updatedAt'])
+            )
+          );
+
+        allow delete: if isValidId(restaurantId) && isValidId(orderId) && isAdmin();
+      }
+
+      // Subcollection: Zero-PII Live Order Status Tracker (Split Collection for real-time guest phone updates)
+      match /orderStatus/{orderId} {
+        allow get: if isValidId(restaurantId) && isValidId(orderId);
+        allow list: if false;
+
+        allow create: if isValidId(restaurantId) &&
+          isValidId(orderId) &&
+          isValidOrderStatus(incoming(), restaurantId) &&
+          incoming().updatedAt == request.time &&
+          restaurantExists(restaurantId) &&
+          incoming().restaurantOwnerId == restaurantDoc(restaurantId).data.ownerId && (
+            (
+              incoming().status == 'pending' &&
+              restaurantDoc(restaurantId).data.active == true &&
+              incoming().tableNumber <= restaurantDoc(restaurantId).data.tableCount &&
+              existsAfter(/databases/$(database)/documents/restaurants/$(restaurantId)/orders/$(orderId))
+            ) ||
+            (
+              isVerifiedUser() &&
+              (isAdmin() || isRestaurantOwner(restaurantId) || isRestaurantStaff(restaurantId)) &&
+              exists(/databases/$(database)/documents/restaurants/$(restaurantId)/orders/$(orderId))
+            )
+          );
+
+        allow update: if isVerifiedUser() &&
+          isValidId(restaurantId) &&
+          isValidId(orderId) &&
+          isValidOrderStatus(incoming(), restaurantId) &&
+          incoming().restaurantId == existing().restaurantId &&
+          incoming().restaurantOwnerId == existing().restaurantOwnerId &&
+          incoming().orderNumber == existing().orderNumber &&
+          incoming().tableNumber == existing().tableNumber &&
           incoming().updatedAt == request.time &&
           restaurantExists(restaurantId) && (
             isAdmin() ||

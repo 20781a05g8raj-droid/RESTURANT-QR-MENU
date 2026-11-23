@@ -51,3 +51,10 @@ test('firestore.rules allows strictly validated guest QR/voice order creation wh
   assert.match(rulesSource, /allow get: if isVerifiedUser\(\)/);
   assert.match(rulesSource, /allow update: if isVerifiedUser\(\)/);
 });
+
+test('firestore.rules enforces zero-PII split collection for real-time guest orderStatus tracking', () => {
+  assert.match(rulesSource, /match \/orderStatus\/\{orderId\}/);
+  assert.match(rulesSource, /function isValidOrderStatus\(data, restaurantId\)/);
+  assert.match(rulesSource, /allow list: if false;/);
+  assert.match(rulesSource, /existsAfter\(\/databases\/\$\(database\)\/documents\/restaurants\/\$\(restaurantId\)\/orders\/\$\(orderId\)\)/);
+});

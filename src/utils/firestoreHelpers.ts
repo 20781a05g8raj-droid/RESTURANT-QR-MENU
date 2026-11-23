@@ -202,6 +202,27 @@ export function buildFirestoreOrderFields(
   };
 }
 
+const VALID_ORDER_STATUSES = ['pending', 'preparing', 'ready', 'served', 'cancelled'] as const;
+
+/**
+ * Builds the exact zero-PII payload expected by firestore.rules isValidOrderStatus(data, restaurantId)
+ * (excluding updatedAt serverTimestamp which callers attach).
+ */
+export function buildFirestoreOrderStatusFields(
+  order: Pick<Order, 'orderNumber' | 'tableNumber' | 'status'>,
+  restaurantId: string,
+  restaurantOwnerId: string
+) {
+  const safeStatus = VALID_ORDER_STATUSES.includes(order.status) ? order.status : 'pending';
+  return {
+    restaurantId,
+    restaurantOwnerId,
+    orderNumber: clampString(order.orderNumber, 2, 32, 'ORD-100'),
+    tableNumber: clampInt(order.tableNumber, 1, 250, 1),
+    status: safeStatus,
+  };
+}
+
 /**
  * Builds the exact payload expected by firestore.rules isValidStaffMember(data, restaurantId)
  * (excluding createdAt/updatedAt serverTimestamp which callers attach).

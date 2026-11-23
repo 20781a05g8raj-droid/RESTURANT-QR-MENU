@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import QRCode from 'qrcode';
+import { doc, onSnapshot } from 'firebase/firestore';
 import {
   Check,
   CheckCircle2,
@@ -20,7 +21,9 @@ import {
 } from 'lucide-react';
 import { usePlatform } from '../context/PlatformContext';
 import { GENERATED_IMAGES } from '../data/seedData';
-import type { MarketInsightResult, OrderItem } from '../types/domain';
+import { db } from '../lib/firebase';
+import type { MarketInsightResult, OrderItem, OrderStatus } from '../types/domain';
+import { isSafeFirestoreId } from '../utils/firestoreHelpers';
 import {
   buildWifiQrString,
   formatCurrency,
@@ -28,6 +31,66 @@ import {
   getMenuItemPhotos,
 } from '../utils/restaurantLogic';
 import { LiveVoiceOrderDrawer } from './LiveVoiceOrderDrawer';
+
+interface GuestTrackedOrderReceipt {
+  id: string;
+  restaurantId: string;
+  orderNumber: string;
+  tableNumber: number;
+  customerName: string;
+  totalAmount: number;
+  status: OrderStatus;
+}
+
+const GUEST_TRACKER_STORAGE_PREFIX = 'tablepulse_guest_order_v1:';
+
+function loadSavedGuestReceipt(restaurantId: string): GuestTrackedOrderReceipt | null {
+  try {
+    const raw = localStorage.getItem(`${GUEST_TRACKER_STORAGE_PREFIX}${restaurantId}`);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as Partial<GuestTrackedOrderReceipt>;
+    if (!parsed.id || !parsed.orderNumber || parsed.restaurantId !== restaurantId) return null;
+    return {
+      id: String(parsed.id),
+      restaurantId,
+      orderNumber: String(parsed.orderNumber),
+      tableNumber: Number(parsed.tableNumber ?? 1),
+      customerName: String(parsed.customerName ?? 'Guest'),
+      totalAmount: Number(parsed.totalAmount ?? 0),
+      status: (parsed.status as OrderStatus) ?? 'pending',
+    };
+  } catch {
+    return null;
+  }
+}
+
+function saveGuestReceipt(receipt: GuestTrackedOrderReceipt | null, restaurantId: string): void {
+  try {
+    const key = `${GUEST_TRACKER_STORAGE_PREFIX}${restaurantId}`;
+    if (!receipt) {
+      localStorage.removeItem(key);
+    } else {
+      localStorage.setItem(key, JSON.stringify(receipt));
+    }
+  } catch {
+    // ignore storage limits
+  }
+}
+
+function getLiveStatusMessage(status: OrderStatus, tableNumber: number): string {
+  switch (status) {
+    case 'pending':
+      return 'Order received by the kitchen — waiting for the chef to start preparing.';
+    case 'preparing':
+      return 'Your food is being freshly prepared in the kitchen right now.';
+    case 'ready':
+      return `Your food is ready! Our staff is bringing it to Table ${tableNumber} now.`;
+    case 'served':
+      return `Served at Table ${tableNumber}. Enjoy your meal!`;
+    case 'cancelled':
+      return 'This order was cancelled by the restaurant.';
+  }
+}
 
 export function CustomerMenuView() {
   const {
@@ -55,9 +118,21 @@ export function CustomerMenuView() {
   const [cartOpen, setCartOpen] = useState(false);
   const [voiceOpen, setVoiceOpen] = useState(false);
   const [lastPlacedOrderId, setLastPlacedOrderId] = useState<string | null>(null);
+  const [guestReceipt, setGuestReceipt] = useState<GuestTrackedOrderReceipt | null>(() =>
+    loadSavedGuestReceipt(activeRestaurant.id)
+  );
+  const [liveCloudStatus, setLiveCloudStatus] = useState<OrderStatus | null>(null);
   const [copiedWifiPass, setCopiedWifiPass] = useState(false);
   const [wifiQrUrl, setWifiQrUrl] = useState('');
   const [photoIndexByDish, setPhotoIndexByDish] = useState<Record<string, number>>({});
+
+  // Restore saved guest receipt when switching active restaurant
+  useEffect(() => {
+    const saved = loadSavedGuestReceipt(activeRestaurant.id);
+    setGuestReceipt(saved);
+    setLastPlacedOrderId(saved?.id ?? null);
+    setLiveCloudStatus(null);
+  }, [activeRestaurant.id]);
 
   // Dish Search Grounding modal
   const [dishAskOpen, setDishAskOpen] = useState(false);
@@ -114,18 +189,69 @@ export function CustomerMenuView() {
   const cartTotalAmount = cartItems.reduce((sum, i) => sum + i.price * i.quantity, 0);
 
   const trackedOrder = useMemo(() => {
-    if (lastPlacedOrderId) {
-      return activeOrders.find((o) => o.id === lastPlacedOrderId) ?? null;
+    const targetId = lastPlacedOrderId ?? guestReceipt?.id ?? null;
+    const fromState = targetId
+      ? activeOrders.find((o) => o.id === targetId) ?? null
+      : activeOrders.find(
+          (o) =>
+            o.tableNumber === customerTableNumber &&
+            o.status !== 'served' &&
+            o.status !== 'cancelled'
+        ) ?? null;
+
+    if (fromState) {
+      return {
+        ...fromState,
+        status: liveCloudStatus ?? fromState.status,
+      };
     }
-    return (
-      activeOrders.find(
-        (o) =>
-          o.tableNumber === customerTableNumber &&
-          o.status !== 'served' &&
-          o.status !== 'cancelled'
-      ) ?? null
+
+    if (guestReceipt && guestReceipt.restaurantId === activeRestaurant.id) {
+      return {
+        ...guestReceipt,
+        status: liveCloudStatus ?? guestReceipt.status,
+      };
+    }
+
+    return null;
+  }, [activeOrders, activeRestaurant.id, customerTableNumber, guestReceipt, lastPlacedOrderId, liveCloudStatus]);
+
+  // Real-time Firestore listener on zero-PII orderStatus/{orderId} so kitchen updates push live to guest phone
+  const trackedOrderId = trackedOrder?.id ?? null;
+  useEffect(() => {
+    if (!trackedOrderId || !isSafeFirestoreId(activeRestaurant.id) || !isSafeFirestoreId(trackedOrderId)) {
+      return;
+    }
+
+    const statusRef = doc(db, 'restaurants', activeRestaurant.id, 'orderStatus', trackedOrderId);
+    const unsub = onSnapshot(
+      statusRef,
+      (snap) => {
+        if (!snap.exists()) return;
+        const nextStatus = snap.data().status as OrderStatus | undefined;
+        if (
+          nextStatus === 'pending' ||
+          nextStatus === 'preparing' ||
+          nextStatus === 'ready' ||
+          nextStatus === 'served' ||
+          nextStatus === 'cancelled'
+        ) {
+          setLiveCloudStatus(nextStatus);
+          setGuestReceipt((prev) => {
+            if (!prev || prev.id !== trackedOrderId) return prev;
+            const updated = { ...prev, status: nextStatus };
+            saveGuestReceipt(updated, activeRestaurant.id);
+            return updated;
+          });
+        }
+      },
+      (err) => {
+        console.warn('Live order status listener paused:', err.message);
+      }
     );
-  }, [activeOrders, lastPlacedOrderId, customerTableNumber]);
+
+    return () => unsub();
+  }, [activeRestaurant.id, trackedOrderId]);
 
   const updateCartQty = (menuItemId: string, delta: number) => {
     const dish = activeMenu.find((m) => m.id === menuItemId);
@@ -168,7 +294,19 @@ export function CustomerMenuView() {
       source,
       notes: overrideNotes ?? orderNotes,
     });
+    const receipt: GuestTrackedOrderReceipt = {
+      id: created.id,
+      restaurantId: activeRestaurant.id,
+      orderNumber: created.orderNumber,
+      tableNumber: created.tableNumber,
+      customerName: created.customerName,
+      totalAmount: created.totalAmount,
+      status: created.status,
+    };
+    setGuestReceipt(receipt);
+    saveGuestReceipt(receipt, activeRestaurant.id);
     setLastPlacedOrderId(created.id);
+    setLiveCloudStatus(created.status);
     setCart({});
     setOrderNotes('');
     setCartOpen(false);
@@ -364,42 +502,92 @@ export function CustomerMenuView() {
           aria-label="Live order tracker"
           className="bg-white border border-slate-200 rounded-xl p-5 space-y-4"
         >
-          <div className="flex flex-wrap items-center justify-between gap-2">
-            <div>
-              <p className="text-xs font-medium text-emerald-700">Live Order Status</p>
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div className="space-y-1">
+              <div className="flex items-center gap-2">
+                <span
+                  className={`inline-block w-2 h-2 rounded-full ${
+                    trackedOrder.status === 'cancelled'
+                      ? 'bg-red-500'
+                      : trackedOrder.status === 'served'
+                        ? 'bg-emerald-600'
+                        : 'bg-emerald-500 animate-pulse'
+                  }`}
+                />
+                <p className="text-xs font-semibold text-emerald-700">
+                  {trackedOrder.status === 'cancelled'
+                    ? 'Order Cancelled'
+                    : trackedOrder.status === 'served'
+                      ? 'Order Completed'
+                      : 'Live Kitchen Status · Auto-Updates'}
+                </p>
+              </div>
               <h3 className="text-base font-bold text-slate-900">
                 {trackedOrder.orderNumber} · Table {trackedOrder.tableNumber} · {trackedOrder.customerName}
               </h3>
+              <p className="text-xs text-slate-600">
+                {getLiveStatusMessage(trackedOrder.status, trackedOrder.tableNumber)}
+              </p>
             </div>
-            <span className="font-mono tabular-nums text-sm font-semibold text-slate-900">
-              {formatCurrency(trackedOrder.totalAmount, activeRestaurant.currency)}
-            </span>
+            <div className="flex items-center gap-3">
+              <span className="font-mono tabular-nums text-sm font-semibold text-slate-900">
+                {formatCurrency(trackedOrder.totalAmount, activeRestaurant.currency)}
+              </span>
+              {(trackedOrder.status === 'served' || trackedOrder.status === 'cancelled') && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setGuestReceipt(null);
+                    setLastPlacedOrderId(null);
+                    setLiveCloudStatus(null);
+                    saveGuestReceipt(null, activeRestaurant.id);
+                  }}
+                  aria-label="Dismiss completed order tracker"
+                  className="p-1 rounded-md text-slate-400 hover:text-slate-600 hover:bg-slate-100"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              )}
+            </div>
           </div>
 
-          <div className="grid grid-cols-4 gap-2">
-            {statusSteps.map((step, index) => {
-              const currentIdx = statusSteps.indexOf(
-                trackedOrder.status === 'cancelled' ? 'pending' : trackedOrder.status
-              );
-              const done = index <= currentIdx;
+          {trackedOrder.status === 'cancelled' ? (
+            <div className="rounded-lg bg-red-50 border border-red-200 px-3 py-2 text-xs font-medium text-red-700">
+              Your order was cancelled by the restaurant. Please ask staff if you need assistance.
+            </div>
+          ) : (
+            (() => {
+              const currentIdx = statusSteps.indexOf(trackedOrder.status);
               return (
-                <div key={step} className="space-y-1.5">
-                  <div
-                    className={`h-1.5 rounded-full ${
-                      done ? 'bg-emerald-600' : 'bg-slate-200'
-                    }`}
-                  />
-                  <p
-                    className={`text-xs font-medium capitalize ${
-                      done ? 'text-slate-900' : 'text-slate-400'
-                    }`}
-                  >
-                    {step === 'pending' ? 'Received' : step}
-                  </p>
+                <div className="grid grid-cols-4 gap-2">
+                  {statusSteps.map((step, index) => {
+                    const done = index <= currentIdx;
+                    const isCurrent = index === currentIdx;
+                    return (
+                      <div key={step} className="space-y-1.5">
+                        <div
+                          className={`h-2 rounded-full transition-colors ${
+                            done ? 'bg-emerald-600' : 'bg-slate-200'
+                          }`}
+                        />
+                        <p
+                          className={`text-xs capitalize ${
+                            isCurrent
+                              ? 'font-bold text-emerald-700'
+                              : done
+                                ? 'font-medium text-slate-900'
+                                : 'font-medium text-slate-400'
+                          }`}
+                        >
+                          {step === 'pending' ? 'Received' : step}
+                        </p>
+                      </div>
+                    );
+                  })}
                 </div>
               );
-            })}
-          </div>
+            })()
+          )}
         </section>
       )}
 

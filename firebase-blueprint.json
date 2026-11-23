@@ -73,6 +73,20 @@
       },
       "required": ["restaurantId", "restaurantOwnerId", "orderNumber", "tableNumber", "customerName", "customerUid", "items", "totalAmount", "status", "source", "notes", "createdAt", "updatedAt"]
     },
+    "OrderStatus": {
+      "title": "OrderStatus",
+      "description": "Zero-PII real-time order progress mirror so dine-in QR guests can watch kitchen status live without authentication.",
+      "type": "object",
+      "properties": {
+        "restaurantId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "restaurantOwnerId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "orderNumber": { "type": "string", "minLength": 2, "maxLength": 32 },
+        "tableNumber": { "type": "integer" },
+        "status": { "type": "string", "enum": ["pending", "preparing", "ready", "served", "cancelled"] },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["restaurantId", "restaurantOwnerId", "orderNumber", "tableNumber", "status", "updatedAt"]
+    },
     "StaffMember": {
       "title": "StaffMember",
       "description": "Role-based staff record for a restaurant (contains PII email, isolated to owner/admin/self).",
@@ -107,6 +121,10 @@
     "/restaurants/{restaurantId}/orders/{orderId}": {
       "schema": { "$ref": "#/entities/Order" },
       "description": "Live kitchen and table orders for each restaurant."
+    },
+    "/restaurants/{restaurantId}/orderStatus/{orderId}": {
+      "schema": { "$ref": "#/entities/OrderStatus" },
+      "description": "Zero-PII live status tracker mirrored per order for real-time guest phone updates."
     },
     "/restaurants/{restaurantId}/staff/{staffId}": {
       "schema": { "$ref": "#/entities/StaffMember" },

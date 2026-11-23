@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {
   buildFirestoreMenuItemFields,
   buildFirestoreOrderFields,
+  buildFirestoreOrderStatusFields,
   buildFirestoreRestaurantFields,
   buildFirestoreStaffFields,
   formatFirebaseAuthError,
@@ -130,6 +131,21 @@ test('buildFirestoreOrderFields and buildFirestoreStaffFields match strict rule 
   );
   assert.equal(staff.email, 'meera@example.com');
   assert.equal(staff.restaurantOwnerId, 'owner-uid');
+
+  const statusDoc = buildFirestoreOrderStatusFields(
+    { orderNumber: 'ORD-512', tableNumber: 4, status: 'preparing' },
+    'rest-1',
+    'owner-uid'
+  );
+  assert.deepEqual(Object.keys(statusDoc).sort(), [
+    'orderNumber',
+    'restaurantId',
+    'restaurantOwnerId',
+    'status',
+    'tableNumber',
+  ]);
+  assert.equal(statusDoc.status, 'preparing');
+  assert.equal('customerName' in statusDoc, false);
 });
 
 test('formatFirebaseAuthError explains Vercel unauthorized-domain and internal-error clearly', () => {

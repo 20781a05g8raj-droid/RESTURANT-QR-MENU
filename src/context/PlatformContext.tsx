@@ -27,6 +27,7 @@ import {
 import {
   buildFirestoreMenuItemFields,
   buildFirestoreOrderFields,
+  buildFirestoreOrderStatusFields,
   buildFirestoreRestaurantFields,
   buildFirestoreStaffFields,
   formatFirebaseAuthError,
@@ -1764,15 +1765,22 @@ export function PlatformProvider({ children }: { children: React.ReactNode }) {
       const restId = activeRestaurant.id;
       const totalAmount = input.items.reduce((sum, i) => sum + i.price * i.quantity, 0);
       const orderNum = `ORD-${Math.floor(410 + Math.random() * 580)}`;
-      const randomSuffix = Math.random().toString(36).slice(2, 8).padEnd(6, 'x');
-      const guestUid = `guest-${Date.now().toString(36)}-${randomSuffix}`;
+      const entropyBytes = new Uint8Array(9);
+      let entropyToken = '';
+      if (typeof crypto !== 'undefined' && typeof crypto.getRandomValues === 'function') {
+        crypto.getRandomValues(entropyBytes);
+        entropyToken = Array.from(entropyBytes, (b) => b.toString(16).padStart(2, '0')).join('');
+      } else {
+        entropyToken = `${Math.random().toString(36).slice(2, 10)}${Math.random().toString(36).slice(2, 10)}`;
+      }
+      const guestUid = `guest-${Date.now().toString(36)}-${entropyToken.slice(0, 12)}`;
       const isSignedInVerified = Boolean(user && user.emailVerified);
       const effectiveUid = isSignedInVerified && user ? user.uid : guestUid;
       const safeSource: OrderSource =
         !isSignedInVerified && input.source === 'staff' ? 'qr' : input.source;
 
       const newOrder: Order = {
-        id: `${restId}-ord-${Date.now().toString(36)}-${randomSuffix.slice(0, 4)}`,
+        id: `${restId.slice(0, 60)}-ord-${Date.now().toString(36)}-${entropyToken}`,
         restaurantId: restId,
         restaurantOwnerId: activeRestaurant.ownerId,
         orderNumber: orderNum,
@@ -1810,7 +1818,7 @@ export function PlatformProvider({ children }: { children: React.ReactNode }) {
         };
       });
 
-      // Sync directly to Cloud Firestore for both signed-in users and guest QR/Voice diners (no sign-in required)
+      // Sync directly to Cloud Firestore (atomic batch: order + zero-PII live orderStatus mirror)
       if (isSafeFirestoreId(restId)) {
         const orderPath = `restaurants/${restId}/orders/${newOrder.id}`;
         void (async () => {
@@ -1842,11 +1850,17 @@ export function PlatformProvider({ children }: { children: React.ReactNode }) {
               ...newOrder,
               tableNumber: clampedTableNumber,
             };
-            await setDoc(doc(db, 'restaurants', restId, 'orders', newOrder.id), {
+            const batch = writeBatch(db);
+            batch.set(doc(db, 'restaurants', restId, 'orders', newOrder.id), {
               ...buildFirestoreOrderFields(cloudOrder, restId, parentOwnerId, effectiveUid),
               createdAt: serverTimestamp(),
               updatedAt: serverTimestamp(),
             });
+            batch.set(doc(db, 'restaurants', restId, 'orderStatus', newOrder.id), {
+              ...buildFirestoreOrderStatusFields(cloudOrder, restId, parentOwnerId),
+              updatedAt: serverTimestamp(),
+            });
+            await batch.commit();
           } catch (err) {
             reportCloudWriteError(err, OperationType.CREATE, orderPath);
           }
@@ -1886,18 +1900,44 @@ export function PlatformProvider({ children }: { children: React.ReactNode }) {
         };
       });
 
-      if (user && user.emailVerified) {
+      if (user && user.emailVerified && isSafeFirestoreId(restId) && isSafeFirestoreId(orderId)) {
         const orderPath = `restaurants/${restId}/orders/${orderId}`;
         void (async () => {
           try {
             const orderRef = doc(db, 'restaurants', restId, 'orders', orderId);
-            const snap = await getDoc(orderRef);
-            if (snap.exists()) {
-              await updateDoc(orderRef, {
+            const statusRef = doc(db, 'restaurants', restId, 'orderStatus', orderId);
+            const [orderSnap, statusSnap] = await Promise.all([
+              getDoc(orderRef),
+              getDoc(statusRef),
+            ]);
+            if (!orderSnap.exists()) return;
+
+            const orderData = orderSnap.data();
+            const batch = writeBatch(db);
+            batch.update(orderRef, {
+              status: nextStatus,
+              updatedAt: serverTimestamp(),
+            });
+            if (statusSnap.exists()) {
+              batch.update(statusRef, {
                 status: nextStatus,
                 updatedAt: serverTimestamp(),
               });
+            } else {
+              batch.set(statusRef, {
+                ...buildFirestoreOrderStatusFields(
+                  {
+                    orderNumber: String(orderData.orderNumber ?? 'ORD-100'),
+                    tableNumber: Number(orderData.tableNumber ?? 1),
+                    status: nextStatus,
+                  },
+                  restId,
+                  String(orderData.restaurantOwnerId ?? activeRestaurant.ownerId)
+                ),
+                updatedAt: serverTimestamp(),
+              });
             }
+            await batch.commit();
           } catch (err) {
             reportCloudWriteError(err, OperationType.UPDATE, orderPath);
           }
