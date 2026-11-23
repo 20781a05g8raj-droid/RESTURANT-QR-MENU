@@ -3,10 +3,13 @@ import QRCode from 'qrcode';
 import {
   ArrowUpRight,
   Download,
+  KeyRound,
+  Pencil,
   Plus,
   QrCode,
   Search,
   Smartphone,
+  Trash2,
   X,
 } from 'lucide-react';
 import { usePlatform } from '../context/PlatformContext';
@@ -24,6 +27,9 @@ export function FleetDirectory() {
     selectRestaurantById,
     setActiveTab,
     setAddRestaurantModalOpen,
+    setEditingRestaurant,
+    deleteRestaurant,
+    restaurantAccountUsernames,
     qrPublicOrigin,
   } = usePlatform();
 
@@ -31,6 +37,8 @@ export function FleetDirectory() {
   const [planFilter, setPlanFilter] = useState<'All' | SubscriptionPlan>('All');
   const [cityFilter, setCityFilter] = useState('All');
   const [page, setPage] = useState(1);
+  const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
 
   // Bulk QR Kit modal state
   const [bulkKitOpen, setBulkKitOpen] = useState(false);
@@ -239,23 +247,42 @@ export function FleetDirectory() {
         </div>
       </div>
 
-      {/* 100+ Restaurant Table */}
+      {deleteError && (
+        <div
+          role="alert"
+          className="px-4 py-2.5 rounded-xl bg-red-50 border border-red-200 text-xs text-red-700 flex items-center justify-between"
+        >
+          <span>{deleteError}</span>
+          <button
+            type="button"
+            onClick={() => setDeleteError(null)}
+            aria-label="Dismiss delete error"
+            className="p-1 text-red-600 hover:bg-red-100 rounded"
+          >
+            <X className="w-3.5 h-3.5" />
+          </button>
+        </div>
+      )}
+
+      {/* Restaurant Fleet Table */}
       <div className="bg-white border border-slate-200 rounded-xl overflow-hidden">
         <div className="overflow-x-auto">
           <table className="w-full text-left border-collapse">
             <thead>
               <tr className="border-b border-slate-200 text-xs font-medium text-slate-500 bg-slate-50/70">
                 <th className="py-3.5 px-5">Restaurant</th>
-                <th className="py-3.5 px-4">Plan</th>
-                <th className="py-3.5 px-4">Guest WiFi SSID</th>
+                <th className="py-3.5 px-4">Owner Login ID</th>
+                <th className="py-3.5 px-4">Plan & Status</th>
+                <th className="py-3.5 px-4">Guest WiFi</th>
                 <th className="py-3.5 px-4 text-right">Tables</th>
-                <th className="py-3.5 px-4 text-right">Monthly Sales</th>
-                <th className="py-3.5 px-5 text-right">Manage</th>
+                <th className="py-3.5 px-5 text-right">Actions</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100 text-sm">
               {paged.map((r) => {
                 const isSelected = r.id === activeRestaurant.id;
+                const ownerUser = restaurantAccountUsernames[r.id] ?? r.ownerUsername;
+                const isConfirmingDelete = confirmDeleteId === r.id;
                 return (
                   <tr
                     key={r.id}
@@ -269,6 +296,23 @@ export function FleetDirectory() {
                         {r.city} · {r.cuisine}
                       </p>
                     </td>
+                    <td className="py-3 px-4 whitespace-nowrap">
+                      {ownerUser ? (
+                        <span className="inline-flex items-center gap-1.5 font-mono text-xs text-emerald-800">
+                          <KeyRound className="w-3.5 h-3.5 text-emerald-600" />
+                          <span>{ownerUser}</span>
+                        </span>
+                      ) : (
+                        <button
+                          type="button"
+                          onClick={() => setEditingRestaurant(r)}
+                          className="inline-flex items-center gap-1 text-xs font-medium text-amber-700 hover:text-amber-900 underline underline-offset-2"
+                        >
+                          <KeyRound className="w-3.5 h-3.5" />
+                          <span>Set ID & Password</span>
+                        </button>
+                      )}
+                    </td>
                     <td className="py-3 px-4 text-xs font-medium text-slate-700 whitespace-nowrap">
                       {r.plan} ·{' '}
                       <span className={r.active ? 'text-emerald-700' : 'text-amber-700'}>
@@ -281,11 +325,8 @@ export function FleetDirectory() {
                     <td className="py-3 px-4 text-right font-mono tabular-nums text-slate-700">
                       {r.tableCount}
                     </td>
-                    <td className="py-3 px-4 text-right font-mono tabular-nums font-medium text-slate-900">
-                      {formatCurrency(r.monthlyRevenue, r.currency)}
-                    </td>
                     <td className="py-3 px-5 text-right whitespace-nowrap">
-                      <div className="inline-flex items-center gap-2">
+                      <div className="inline-flex items-center gap-1.5">
                         <button
                           type="button"
                           onClick={() => {
@@ -321,6 +362,41 @@ export function FleetDirectory() {
                           <Smartphone className="w-3.5 h-3.5" />
                           <span>Menu</span>
                         </button>
+                        <button
+                          type="button"
+                          onClick={() => setEditingRestaurant(r)}
+                          aria-label={`Edit ${r.name}`}
+                          className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg border border-slate-200 text-xs font-medium text-slate-700 hover:bg-slate-100"
+                        >
+                          <Pencil className="w-3.5 h-3.5" />
+                          <span>Edit</span>
+                        </button>
+                        {restaurants.length > 1 && (
+                          <button
+                            type="button"
+                            onClick={async () => {
+                              if (!isConfirmingDelete) {
+                                setConfirmDeleteId(r.id);
+                                return;
+                              }
+                              setDeleteError(null);
+                              const res = await deleteRestaurant(r.id);
+                              setConfirmDeleteId(null);
+                              if (!res.ok && res.error) {
+                                setDeleteError(res.error);
+                              }
+                            }}
+                            aria-label={`Delete ${r.name}`}
+                            className={`inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-xs font-medium transition-colors ${
+                              isConfirmingDelete
+                                ? 'bg-red-600 text-white hover:bg-red-700'
+                                : 'border border-red-200 text-red-700 hover:bg-red-50'
+                            }`}
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                            <span>{isConfirmingDelete ? 'Confirm' : 'Delete'}</span>
+                          </button>
+                        )}
                       </div>
                     </td>
                   </tr>

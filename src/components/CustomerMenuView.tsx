@@ -3,6 +3,8 @@ import QRCode from 'qrcode';
 import {
   Check,
   CheckCircle2,
+  ChevronLeft,
+  ChevronRight,
   Copy,
   Download,
   ExternalLink,
@@ -23,6 +25,7 @@ import {
   buildWifiQrString,
   formatCurrency,
   generateIosWifiProfileXml,
+  getMenuItemPhotos,
 } from '../utils/restaurantLogic';
 import { LiveVoiceOrderDrawer } from './LiveVoiceOrderDrawer';
 
@@ -53,6 +56,7 @@ export function CustomerMenuView() {
   const [lastPlacedOrderId, setLastPlacedOrderId] = useState<string | null>(null);
   const [copiedWifiPass, setCopiedWifiPass] = useState(false);
   const [wifiQrUrl, setWifiQrUrl] = useState('');
+  const [photoIndexByDish, setPhotoIndexByDish] = useState<Record<string, number>>({});
 
   // Dish Search Grounding modal
   const [dishAskOpen, setDishAskOpen] = useState(false);
@@ -516,6 +520,19 @@ export function CustomerMenuView() {
       <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
         {filteredMenu.map((item) => {
           const qty = cart[item.id] ?? 0;
+          const photos = getMenuItemPhotos(item);
+          const activePhotoIdx =
+            photos.length > 0 ? (photoIndexByDish[item.id] ?? 0) % photos.length : 0;
+          const currentPhoto = photos[activePhotoIdx] ?? item.imageUrl;
+
+          const stepPhoto = (delta: number) => {
+            if (photos.length <= 1) return;
+            setPhotoIndexByDish((prev) => ({
+              ...prev,
+              [item.id]: ((prev[item.id] ?? 0) + delta + photos.length) % photos.length,
+            }));
+          };
+
           return (
             <article
               key={item.id}
@@ -523,13 +540,61 @@ export function CustomerMenuView() {
                 item.available ? '' : 'opacity-70 bg-slate-50'
               }`}
             >
-              <div className="sm:w-40 h-44 sm:h-auto shrink-0 relative bg-slate-100">
+              <div className="sm:w-44 h-48 sm:h-auto shrink-0 relative bg-slate-100 select-none">
                 <img
-                  src={item.imageUrl}
-                  alt={item.name}
+                  src={currentPhoto}
+                  alt={
+                    photos.length > 1
+                      ? `${item.name} photo ${activePhotoIdx + 1} of ${photos.length}`
+                      : item.name
+                  }
                   referrerPolicy="no-referrer"
                   className={`w-full h-full object-cover ${item.available ? '' : 'grayscale'}`}
                 />
+
+                {photos.length > 1 && (
+                  <>
+                    <span className="absolute top-2 right-2 px-1.5 py-0.5 rounded bg-slate-900/75 text-white text-[10px] font-mono tabular-nums font-semibold">
+                      {activePhotoIdx + 1}/{photos.length}
+                    </span>
+
+                    <button
+                      type="button"
+                      onClick={() => stepPhoto(-1)}
+                      aria-label={`Previous photo of ${item.name}`}
+                      className="absolute left-1.5 top-1/2 -translate-y-1/2 w-7 h-7 rounded-full bg-slate-900/70 text-white flex items-center justify-center hover:bg-slate-900 transition-colors"
+                    >
+                      <ChevronLeft className="w-4 h-4" />
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => stepPhoto(1)}
+                      aria-label={`Next photo of ${item.name}`}
+                      className="absolute right-1.5 top-1/2 -translate-y-1/2 w-7 h-7 rounded-full bg-slate-900/70 text-white flex items-center justify-center hover:bg-slate-900 transition-colors"
+                    >
+                      <ChevronRight className="w-4 h-4" />
+                    </button>
+
+                    <div className="absolute bottom-2 inset-x-0 flex items-center justify-center gap-1.5">
+                      {photos.map((_, idx) => (
+                        <button
+                          key={idx}
+                          type="button"
+                          onClick={() =>
+                            setPhotoIndexByDish((prev) => ({ ...prev, [item.id]: idx }))
+                          }
+                          aria-label={`Show photo ${idx + 1} of ${item.name}`}
+                          className={`h-1.5 rounded-full transition-all ${
+                            idx === activePhotoIdx
+                              ? 'w-4 bg-white'
+                              : 'w-1.5 bg-white/60 hover:bg-white/90'
+                          }`}
+                        />
+                      ))}
+                    </div>
+                  </>
+                )}
               </div>
 
               <div className="p-4 flex-1 flex flex-col justify-between gap-3">

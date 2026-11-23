@@ -11,11 +11,15 @@ import {
   Modality,
   Type,
 } from '@google/genai';
+import { AuthManager } from './serverAuth';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const PORT = Number(process.env.PORT || 3000);
 const isProduction = process.env.NODE_ENV === 'production';
+const authManager = new AuthManager({
+  baseDir: path.resolve(__dirname, '.data'),
+});
 
 function getGeminiClient(): GoogleGenAI {
   const apiKey = process.env.GEMINI_API_KEY;
@@ -50,6 +54,82 @@ app.use(express.json({ limit: '2mb' }));
 
 // Health check
 app.get('/api/health', (_req, res) => {
+  res.json({ ok: true });
+});
+
+// ---- Portal Authentication & Per-Restaurant Credentials ----
+app.get('/api/auth/status', (_req, res) => {
+  res.json(authManager.getStatus());
+});
+
+app.post('/api/auth/setup-admin', (req, res) => {
+  const { email, password } = (req.body ?? {}) as { email?: string; password?: string };
+  const result = authManager.claimFirstRunAdmin(String(email ?? ''), String(password ?? ''));
+  if (!result.ok) {
+    res.status(result.status).json({ error: result.error });
+    return;
+  }
+  res.json({ token: result.token, session: result.session });
+});
+
+app.post('/api/auth/login', (req, res) => {
+  const { username, password } = (req.body ?? {}) as { username?: string; password?: string };
+  const result = authManager.login(String(username ?? ''), String(password ?? ''));
+  if (!result.ok) {
+    res.status(result.status).json({ error: result.error });
+    return;
+  }
+  res.json({ token: result.token, session: result.session });
+});
+
+app.get('/api/auth/me', (req, res) => {
+  const session = authManager.verifyAuthHeader(req.headers.authorization);
+  if (!session) {
+    res.status(401).json({ error: 'Not authenticated.' });
+    return;
+  }
+  res.json({ session });
+});
+
+app.get('/api/auth/restaurant-accounts', (req, res) => {
+  const session = authManager.verifyAuthHeader(req.headers.authorization);
+  if (!session || session.role !== 'super_admin') {
+    res.status(403).json({ error: 'App Owner access required.' });
+    return;
+  }
+  res.json({ accounts: authManager.listRestaurantAccounts() });
+});
+
+app.post('/api/auth/restaurant-accounts', (req, res) => {
+  const session = authManager.verifyAuthHeader(req.headers.authorization);
+  if (!session || session.role !== 'super_admin') {
+    res.status(403).json({ error: 'App Owner access required.' });
+    return;
+  }
+  const { restaurantId, username, password } = (req.body ?? {}) as {
+    restaurantId?: string;
+    username?: string;
+    password?: string;
+  };
+  const result = authManager.upsertRestaurantAccount({
+    restaurantId: String(restaurantId ?? ''),
+    username: String(username ?? ''),
+    password: typeof password === 'string' ? password : undefined,
+  });
+  if (!result.ok) {
+    res.status(result.status).json({ error: result.error });
+    return;
+  }
+  res.json({ account: result.account });
+});
+
+app.delete('/api/auth/restaurant-accounts/:restaurantId', (req, res) => {
+  const session = authManager.verifyAuthHeader(req.headers.authorization);
+  if (!session || session.role !== 'super_admin') {
+    res.status(403).json({ error: 'App Owner access required.' });
+    return;
+  }
+  authManager.deleteRestaurantAccount(req.params.restaurantId);
   res.json({ ok: true });
 });
 

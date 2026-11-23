@@ -1,5 +1,4 @@
-import type { MenuItem, Order, Restaurant, StaffMember, SubscriptionPlan } from '../types/domain';
-import { slugifyRestaurantName } from '../utils/restaurantLogic';
+import type { MenuItem, Order, Restaurant, StaffMember } from '../types/domain';
 
 export const GENERATED_IMAGES = {
   butterChicken: '/src/assets/images/dish_butter_chicken_1795431928721.jpg',
@@ -128,66 +127,87 @@ const FLAGSHIP_RESTAURANTS: Restaurant[] = [
   },
 ];
 
-const FLEET_PREFIXES = [
-  'Spice', 'Copper', 'Royal', 'Olive', 'Cedar', 'Lotus', 'Velvet', 'Amber',
-  'Indigo', 'Coastal', 'Heritage', 'Urban', 'Grand', 'Bistro', 'Tamarind', 'Mint',
+const EXTRA_PARTNER_RESTAURANTS: Restaurant[] = [
+  {
+    id: 'rest-deccan-spice',
+    slug: 'deccan-spice-house',
+    name: 'Deccan Spice House',
+    city: 'Hyderabad',
+    cuisine: 'Hyderabadi & Dum Biryani',
+    ownerId: 'demo-owner-7',
+    plan: 'Enterprise',
+    active: true,
+    tableCount: 22,
+    wifiSsid: 'DeccanSpice_5G',
+    wifiPassword: 'BiryaniGold26',
+    wifiSecurity: 'WPA',
+    currency: 'INR',
+    monthlyRevenue: 1120000,
+    activeOrdersCount: 4,
+    createdAt: NOW_ISO,
+    updatedAt: NOW_ISO,
+  },
+  {
+    id: 'rest-copper-terrace',
+    slug: 'copper-terrace',
+    name: 'Copper Terrace Grill',
+    city: 'Kolkata',
+    cuisine: 'Bengali & Charcoal Grill',
+    ownerId: 'demo-owner-8',
+    plan: 'Growth',
+    active: true,
+    tableCount: 16,
+    wifiSsid: 'CopperTerrace_Guest',
+    wifiPassword: 'ParkStreet88',
+    wifiSecurity: 'WPA',
+    currency: 'INR',
+    monthlyRevenue: 690000,
+    activeOrdersCount: 2,
+    createdAt: NOW_ISO,
+    updatedAt: NOW_ISO,
+  },
+  {
+    id: 'rest-olive-courtyard',
+    slug: 'olive-courtyard',
+    name: 'Olive Courtyard Cafe',
+    city: 'Ahmedabad',
+    cuisine: 'Pure Veg Mediterranean & Indian',
+    ownerId: 'demo-owner-9',
+    plan: 'Growth',
+    active: true,
+    tableCount: 18,
+    wifiSsid: 'OliveCourtyard_Free',
+    wifiPassword: 'OliveFresh2026',
+    wifiSecurity: 'WPA',
+    currency: 'INR',
+    monthlyRevenue: 785000,
+    activeOrdersCount: 3,
+    createdAt: NOW_ISO,
+    updatedAt: NOW_ISO,
+  },
+  {
+    id: 'rest-sunset-shack',
+    slug: 'sunset-cove-kitchen',
+    name: 'Sunset Cove Kitchen',
+    city: 'Goa',
+    cuisine: 'Goan Coastal & Cocktails',
+    ownerId: 'demo-owner-10',
+    plan: 'Starter',
+    active: true,
+    tableCount: 14,
+    wifiSsid: 'SunsetCove_WiFi',
+    wifiPassword: 'GoaBreeze99',
+    wifiSecurity: 'WPA',
+    currency: 'INR',
+    monthlyRevenue: 540000,
+    activeOrdersCount: 2,
+    createdAt: NOW_ISO,
+    updatedAt: NOW_ISO,
+  },
 ];
-const FLEET_SUFFIXES = [
-  'Kitchen', 'House', 'Terrace', 'Lounge', 'Table', 'Grill', 'Cafe', 'Darbar',
-  'Pavilion', 'Express', 'Haveli', 'Bites',
-];
-const FLEET_CITIES = [
-  'Mumbai', 'Bengaluru', 'New Delhi', 'Hyderabad', 'Pune', 'Chennai',
-  'Kolkata', 'Ahmedabad', 'Jaipur', 'Chandigarh', 'Goa', 'Indore',
-];
-const FLEET_CUISINES = [
-  'North Indian', 'South Indian', 'Pan-Asian', 'Italian & Pizza', 'Continental',
-  'Mughlai & Kebabs', 'Cafe & Bakery', 'Coastal Seafood', 'Street Food Studio',
-];
-const PLANS: SubscriptionPlan[] = ['Starter', 'Growth', 'Enterprise'];
 
 export function generateSeedRestaurants(): Restaurant[] {
-  const fleet: Restaurant[] = [...FLAGSHIP_RESTAURANTS];
-  let idx = 0;
-  for (let i = 0; i < 96; i++) {
-    const prefix = FLEET_PREFIXES[i % FLEET_PREFIXES.length];
-    const suffix = FLEET_SUFFIXES[Math.floor(i / 8) % FLEET_SUFFIXES.length];
-    const city = FLEET_CITIES[(i * 3) % FLEET_CITIES.length];
-    const cuisine = FLEET_CUISINES[(i * 5) % FLEET_CUISINES.length];
-    const plan = PLANS[(i * 7) % PLANS.length];
-    const branchNo = i >= 16 ? ` #${Math.floor(i / 16) + 1}` : '';
-    const name = `${prefix} ${suffix}${branchNo}`;
-    const slug = `${slugifyRestaurantName(name)}-${city.toLowerCase().slice(0, 3)}-${101 + idx}`;
-    const tableCount = 10 + ((i * 3) % 26);
-    const monthlyRevenue =
-      plan === 'Enterprise'
-        ? 1100000 + (i % 7) * 145000
-        : plan === 'Growth'
-          ? 640000 + (i % 6) * 85000
-          : 310000 + (i % 5) * 48000;
-
-    fleet.push({
-      id: `rest-partner-${101 + idx}`,
-      slug,
-      name,
-      city,
-      cuisine,
-      ownerId: `demo-partner-${101 + idx}`,
-      plan,
-      active: i % 19 !== 18,
-      tableCount,
-      wifiSsid: `${prefix}${suffix}_Guest`.replace(/\s+/g, ''),
-      wifiPassword: `Dine${2026 + (i % 90)}`,
-      wifiSecurity: 'WPA',
-      currency: 'INR',
-      monthlyRevenue,
-      activeOrdersCount: i % 6,
-      createdAt: NOW_ISO,
-      updatedAt: NOW_ISO,
-    });
-    idx++;
-  }
-  return fleet;
+  return [...FLAGSHIP_RESTAURANTS, ...EXTRA_PARTNER_RESTAURANTS];
 }
 
 export function generateDefaultMenuForRestaurant(restaurantId: string): MenuItem[] {

@@ -471,3 +471,62 @@ export function computeFleetTotals(restaurants: Restaurant[]): {
     { totalOutlets: 0, activeOutlets: 0, totalTables: 0, monthlyGmv: 0 }
   );
 }
+
+export const MAX_DISH_IMAGES = 6;
+
+const SAFE_DATA_IMAGE_REGEX = /^data:image\/(jpeg|jpg|png|webp|gif);base64,[A-Za-z0-9+/=]+$/i;
+
+/**
+ * Validates that a dish image URL uses an allowed scheme (http/https, root-relative asset path,
+ * or raster base64 data URL). Rejects javascript:, SVG data URIs, and HTML payloads.
+ */
+export function isSafeImageUrl(url: string): boolean {
+  const trimmed = url.trim();
+  if (!trimmed || trimmed.length > 600_000) return false;
+  if (trimmed.startsWith('/') && !trimmed.startsWith('//')) {
+    return !/[\s<>"'`]/.test(trimmed);
+  }
+  if (SAFE_DATA_IMAGE_REGEX.test(trimmed)) {
+    return true;
+  }
+  try {
+    const parsed = new URL(trimmed);
+    return parsed.protocol === 'https:' || parsed.protocol === 'http:';
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Deduplicates, validates, and caps a dish's multi-photo gallery (up to 6 images).
+ */
+export function normalizeDishImages(
+  images: string[] | undefined,
+  fallbackUrl?: string
+): string[] {
+  const seen = new Set<string>();
+  const result: string[] = [];
+
+  for (const raw of images ?? []) {
+    if (typeof raw !== 'string') continue;
+    const trimmed = raw.trim();
+    if (!trimmed || seen.has(trimmed) || !isSafeImageUrl(trimmed)) continue;
+    seen.add(trimmed);
+    result.push(trimmed);
+    if (result.length >= MAX_DISH_IMAGES) break;
+  }
+
+  if (result.length === 0 && fallbackUrl && isSafeImageUrl(fallbackUrl)) {
+    result.push(fallbackUrl.trim());
+  }
+
+  return result;
+}
+
+export function getMenuItemPhotos(item: Pick<MenuItem, 'imageUrl' | 'images'>): string[] {
+  return normalizeDishImages(
+    item.images && item.images.length > 0 ? item.images : [item.imageUrl],
+    item.imageUrl
+  );
+}
+

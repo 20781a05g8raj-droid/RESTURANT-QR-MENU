@@ -10,7 +10,10 @@ import {
   computeAnalytics,
   computeFleetTotals,
   generateIosWifiProfileXml,
+  getMenuItemPhotos,
   getNextOrderStatus,
+  isSafeImageUrl,
+  normalizeDishImages,
   parseScannedRestaurantParams,
   resolvePublicQrOrigin,
   slugifyRestaurantName,
@@ -240,3 +243,38 @@ test('validators reject empty or out-of-bounds blueprint fields', () => {
   assert.equal(fleet.totalOutlets, 1);
   assert.equal(fleet.totalTables, 12);
 });
+
+test('dish image helpers allow safe photos, reject unsafe URLs, deduplicate, and cap at 6', () => {
+  assert.equal(isSafeImageUrl('https://cdn.example.com/dish.jpg'), true);
+  assert.equal(isSafeImageUrl('/src/assets/images/dish_butter_chicken.png'), true);
+  assert.equal(isSafeImageUrl('data:image/jpeg;base64,/9j/4AAQSkZJRg=='), true);
+  assert.equal(isSafeImageUrl('javascript:alert(1)'), false);
+  assert.equal(isSafeImageUrl('data:image/svg+xml;base64,PHN2Zz4='), false);
+  assert.equal(isSafeImageUrl('data:text/html;base64,PGh0bWw+'), false);
+  assert.equal(isSafeImageUrl('//evil.example/a.png'), false);
+
+  const normalized = normalizeDishImages(
+    [
+      'https://cdn.example.com/1.jpg',
+      'javascript:alert(1)',
+      'https://cdn.example.com/1.jpg',
+      'https://cdn.example.com/2.jpg',
+      'https://cdn.example.com/3.jpg',
+      'https://cdn.example.com/4.jpg',
+      'https://cdn.example.com/5.jpg',
+      'https://cdn.example.com/6.jpg',
+      'https://cdn.example.com/7.jpg',
+    ],
+    '/src/assets/images/dish_butter_chicken.png'
+  );
+  assert.equal(normalized.length, 6);
+  assert.equal(normalized[0], 'https://cdn.example.com/1.jpg');
+  assert.equal(normalized[5], 'https://cdn.example.com/6.jpg');
+
+  const fallback = getMenuItemPhotos({
+    imageUrl: '/src/assets/images/dish_paneer_tikka.png',
+    images: [],
+  });
+  assert.deepEqual(fallback, ['/src/assets/images/dish_paneer_tikka.png']);
+});
+

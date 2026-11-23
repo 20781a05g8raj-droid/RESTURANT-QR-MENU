@@ -12,11 +12,25 @@ import { StaffManager } from './components/StaffManager';
 import { FleetDirectory } from './components/FleetDirectory';
 import { CustomerMenuView } from './components/CustomerMenuView';
 import { AddRestaurantModal } from './components/AddRestaurantModal';
+import { EditRestaurantModal } from './components/EditRestaurantModal';
+import { PortalAuthGate } from './components/PortalAuthGate';
 
 function WorkspaceShell() {
-  const { activeTab, activeRole, ttsError, clearTtsError } = usePlatform();
+  const {
+    activeTab,
+    activeRole,
+    portalSession,
+    guestPreviewMode,
+    ttsError,
+    clearTtsError,
+  } = usePlatform();
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
-  const isStandaloneCustomer = activeRole === 'customer';
+
+  if (!portalSession && !guestPreviewMode) {
+    return <PortalAuthGate />;
+  }
+
+  const isStandaloneCustomer = activeRole === 'customer' || (!portalSession && guestPreviewMode);
 
   return (
     <div className="min-h-screen flex bg-slate-50 text-slate-900">
@@ -45,17 +59,24 @@ function WorkspaceShell() {
         )}
 
         <main className="flex-1 min-w-0">
-          {activeTab === 'overview' && <OverviewAnalytics />}
-          {activeTab === 'orders' && <KitchenOrdersBoard />}
-          {activeTab === 'menu' && <MenuManager />}
-          {activeTab === 'qr_wifi' && <QrWifiStudio />}
-          {activeTab === 'staff' && <StaffManager />}
-          {activeTab === 'fleet' && <FleetDirectory />}
-          {activeTab === 'customer_menu' && <CustomerMenuView />}
+          {isStandaloneCustomer ? (
+            <CustomerMenuView />
+          ) : (
+            <>
+              {activeTab === 'overview' && <OverviewAnalytics />}
+              {activeTab === 'orders' && <KitchenOrdersBoard />}
+              {activeTab === 'menu' && <MenuManager />}
+              {activeTab === 'qr_wifi' && <QrWifiStudio />}
+              {activeTab === 'staff' && <StaffManager />}
+              {activeTab === 'fleet' && <FleetDirectory />}
+              {activeTab === 'customer_menu' && <CustomerMenuView />}
+            </>
+          )}
         </main>
       </div>
 
       <AddRestaurantModal />
+      <EditRestaurantModal />
     </div>
   );
 }

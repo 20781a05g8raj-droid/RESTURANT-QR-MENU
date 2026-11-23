@@ -15,6 +15,12 @@ export type WorkspaceTab =
   | 'fleet'
   | 'customer_menu';
 
+export interface PortalSession {
+  role: 'super_admin' | 'owner';
+  username: string;
+  restaurantId: string | null;
+}
+
 export interface Restaurant {
   id: string;
   slug: string;
@@ -22,6 +28,7 @@ export interface Restaurant {
   city: string;
   cuisine: string;
   ownerId: string;
+  ownerUsername?: string;
   plan: SubscriptionPlan;
   active: boolean;
   tableCount: number;
@@ -46,6 +53,7 @@ export interface MenuItem {
   veg: boolean;
   prepMinutes: number;
   imageUrl: string;
+  images?: string[];
   popular: boolean;
   updatedAt: string;
 }

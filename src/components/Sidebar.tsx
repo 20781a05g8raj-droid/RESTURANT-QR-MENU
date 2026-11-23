@@ -3,6 +3,8 @@ import {
   BarChart3,
   Building2,
   ChefHat,
+  LogOut,
+  Pencil,
   Plus,
   QrCode,
   Smartphone,
@@ -31,7 +33,7 @@ const NAV_ITEMS: Array<{
   { id: 'qr_wifi', label: 'QR & Auto WiFi', section: 'Restaurant', icon: QrCode },
   { id: 'staff', label: 'Staff & Roles', section: 'Restaurant', icon: Users },
   { id: 'customer_menu', label: 'Customer QR Menu', section: 'Customer', icon: Smartphone },
-  { id: 'fleet', label: 'All 100+ Outlets', section: 'Platform', icon: Building2 },
+  { id: 'fleet', label: 'All Restaurants', section: 'Platform', icon: Building2 },
 ];
 
 export function Sidebar({ mobileOpen, onCloseMobile }: SidebarProps) {
@@ -43,16 +45,23 @@ export function Sidebar({ mobileOpen, onCloseMobile }: SidebarProps) {
     restaurants,
     activeRestaurant,
     setAddRestaurantModalOpen,
+    setEditingRestaurant,
+    portalSession,
+    logoutPortal,
   } = usePlatform();
 
   const pendingOrdersCount = activeOrders.filter(
     (o) => o.status === 'pending' || o.status === 'preparing' || o.status === 'ready'
   ).length;
 
-  const canAddRestaurant =
-    activeRole === 'super_admin' || activeRole === 'owner' || activeRole === 'manager';
+  const isSuperAdmin = portalSession?.role === 'super_admin';
+  const canEditActiveRestaurant =
+    isSuperAdmin || portalSession?.role === 'owner';
 
-  const visibleItems = NAV_ITEMS.filter((item) => canRoleAccessTab(activeRole, item.id));
+  const visibleItems = NAV_ITEMS.filter((item) => {
+    if (item.id === 'fleet' && !isSuperAdmin) return false;
+    return canRoleAccessTab(activeRole, item.id);
+  });
   const sections: Array<'Platform' | 'Restaurant' | 'Customer'> = [
     'Platform',
     'Restaurant',
@@ -84,17 +93,33 @@ export function Sidebar({ mobileOpen, onCloseMobile }: SidebarProps) {
       </div>
 
       <div className="px-4 py-4 border-b border-slate-100 space-y-3">
-        <div>
-          <p className="text-xs text-slate-500">Active outlet</p>
-          <p className="text-sm font-semibold text-slate-900 truncate mt-0.5">
-            {activeRestaurant.name}
-          </p>
-          <p className="text-xs text-slate-500 mt-0.5 truncate">
-            {activeRestaurant.city} · {activeRestaurant.tableCount} tables
-          </p>
+        <div className="flex items-start justify-between gap-2">
+          <div className="min-w-0">
+            <p className="text-xs text-slate-500">Active outlet</p>
+            <p className="text-sm font-semibold text-slate-900 truncate mt-0.5">
+              {activeRestaurant.name}
+            </p>
+            <p className="text-xs text-slate-500 mt-0.5 truncate">
+              {activeRestaurant.city} · {activeRestaurant.tableCount} tables
+            </p>
+          </div>
+          {canEditActiveRestaurant && (
+            <button
+              type="button"
+              onClick={() => {
+                setEditingRestaurant(activeRestaurant);
+                onCloseMobile();
+              }}
+              aria-label={`Edit ${activeRestaurant.name}`}
+              title="Edit restaurant details"
+              className="p-1.5 rounded-lg border border-slate-200 text-slate-500 hover:text-slate-900 hover:bg-slate-50 shrink-0"
+            >
+              <Pencil className="w-3.5 h-3.5" />
+            </button>
+          )}
         </div>
 
-        {canAddRestaurant && (
+        {isSuperAdmin && (
           <button
             type="button"
             onClick={() => {
@@ -160,9 +185,31 @@ export function Sidebar({ mobileOpen, onCloseMobile }: SidebarProps) {
         })}
       </nav>
 
-      <div className="p-4 border-t border-slate-200 text-xs text-slate-500 space-y-1">
-        <p className="font-medium text-slate-700">Instant QR + WiFi Menu</p>
-        <p>Updates sync live to every guest table.</p>
+      <div className="p-4 border-t border-slate-200 text-xs text-slate-500 space-y-2.5">
+        {portalSession && (
+          <div className="flex items-center justify-between gap-2">
+            <div className="min-w-0">
+              <p className="font-semibold text-slate-800 truncate">
+                {portalSession.role === 'super_admin' ? 'App Owner' : 'Restaurant Owner'}
+              </p>
+              <p className="text-[11px] font-mono text-slate-500 truncate">
+                {portalSession.username}
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={() => {
+                logoutPortal();
+                onCloseMobile();
+              }}
+              aria-label="Sign out of portal"
+              title="Sign out"
+              className="p-1.5 rounded-lg border border-slate-200 text-slate-500 hover:text-red-700 hover:border-red-200 hover:bg-red-50 shrink-0"
+            >
+              <LogOut className="w-3.5 h-3.5" />
+            </button>
+          </div>
+        )}
       </div>
     </div>
   );

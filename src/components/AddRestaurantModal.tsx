@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import QRCode from 'qrcode';
-import { Check, Copy, Download, QrCode, Smartphone, Wifi, X } from 'lucide-react';
+import { Check, Copy, Download, KeyRound, QrCode, Smartphone, Wifi, X } from 'lucide-react';
 import { usePlatform } from '../context/PlatformContext';
 import type { Restaurant, SubscriptionPlan, WifiSecurity } from '../types/domain';
 import {
@@ -19,6 +19,7 @@ export function AddRestaurantModal() {
     setWifiPromptOpen,
     qrPublicOrigin,
     isDevPreviewOrigin,
+    portalSession,
   } = usePlatform();
 
   const [newName, setNewName] = useState('');
@@ -29,6 +30,9 @@ export function AddRestaurantModal() {
   const [newSsid, setNewSsid] = useState('');
   const [newPassword, setNewPassword] = useState('GuestDine2026');
   const [newSecurity, setNewSecurity] = useState<WifiSecurity>('WPA');
+  const [ownerUsername, setOwnerUsername] = useState('');
+  const [ownerPassword, setOwnerPassword] = useState('');
+  const [submitting, setSubmitting] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
 
   const [createdRestaurant, setCreatedRestaurant] = useState<Restaurant | null>(null);
@@ -80,11 +84,13 @@ export function AddRestaurantModal() {
     setWifiQrUrl('');
     setNewName('');
     setNewSsid('');
+    setOwnerUsername('');
+    setOwnerPassword('');
     setFormError(null);
     setAddRestaurantModalOpen(false);
   };
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     const tableNum = Number(newTables);
     const cleanedName = newName.trim();
@@ -105,7 +111,21 @@ export function AddRestaurantModal() {
       return;
     }
 
-    const created = addRestaurant({
+    const isSuperAdmin = portalSession?.role === 'super_admin';
+    if (isSuperAdmin) {
+      if (ownerUsername.trim().length < 3) {
+        setFormError('Set a Restaurant Owner Username (min 3 characters).');
+        return;
+      }
+      if (ownerPassword.length < 6) {
+        setFormError('Set a Restaurant Owner Password (min 6 characters).');
+        return;
+      }
+    }
+
+    setSubmitting(true);
+    setFormError(null);
+    const result = await addRestaurant({
       name: cleanedName,
       city: newCity.trim(),
       cuisine: newCuisine.trim(),
@@ -114,10 +134,17 @@ export function AddRestaurantModal() {
       wifiSsid: ssidValue,
       wifiPassword: newPassword,
       wifiSecurity: newSecurity,
+      ownerUsername: isSuperAdmin ? ownerUsername.trim() : undefined,
+      ownerPassword: isSuperAdmin ? ownerPassword : undefined,
     });
+    setSubmitting(false);
 
-    setFormError(null);
-    setCreatedRestaurant(created);
+    if (!result.ok || !result.restaurant) {
+      setFormError(result.error ?? 'Could not create restaurant.');
+      return;
+    }
+
+    setCreatedRestaurant(result.restaurant);
   };
 
   const downloadImage = (dataUrl: string, filename: string) => {
@@ -307,6 +334,56 @@ export function AddRestaurantModal() {
               </div>
             </div>
 
+            {portalSession?.role === 'super_admin' && (
+              <div className="border border-emerald-200 bg-emerald-50/40 rounded-xl p-4 space-y-3">
+                <div className="flex items-center gap-1.5">
+                  <KeyRound className="w-4 h-4 text-emerald-700" />
+                  <h4 className="text-xs font-bold text-emerald-950">
+                    Restaurant Owner Login Credentials *
+                  </h4>
+                </div>
+                <p className="text-[11px] text-emerald-900/80">
+                  Give this restaurant owner their own username & password to log in and manage only their restaurant.
+                </p>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div>
+                    <label
+                      htmlFor="modal-owner-username"
+                      className="block text-xs font-medium text-slate-700 mb-1"
+                    >
+                      Owner Username / Email *
+                    </label>
+                    <input
+                      id="modal-owner-username"
+                      type="text"
+                      required
+                      value={ownerUsername}
+                      onChange={(e) => setOwnerUsername(e.target.value)}
+                      placeholder="e.g. royalspice_owner"
+                      className="w-full h-10 px-3 rounded-lg border border-slate-200 bg-white text-sm font-mono focus:outline-none focus:ring-2 focus:ring-emerald-600"
+                    />
+                  </div>
+                  <div>
+                    <label
+                      htmlFor="modal-owner-password"
+                      className="block text-xs font-medium text-slate-700 mb-1"
+                    >
+                      Owner Password *
+                    </label>
+                    <input
+                      id="modal-owner-password"
+                      type="password"
+                      required
+                      value={ownerPassword}
+                      onChange={(e) => setOwnerPassword(e.target.value)}
+                      placeholder="Min 6 characters"
+                      className="w-full h-10 px-3 rounded-lg border border-slate-200 bg-white text-sm focus:outline-none focus:ring-2 focus:ring-emerald-600"
+                    />
+                  </div>
+                </div>
+              </div>
+            )}
+
             <div className="flex items-center justify-end gap-2.5 pt-3 border-t border-slate-100">
               <button
                 type="button"
@@ -317,15 +394,27 @@ export function AddRestaurantModal() {
               </button>
               <button
                 type="submit"
-                className="inline-flex items-center gap-2 h-10 px-5 rounded-lg bg-emerald-600 text-white text-sm font-semibold hover:bg-emerald-700 transition-colors"
+                disabled={submitting}
+                className="inline-flex items-center gap-2 h-10 px-5 rounded-lg bg-emerald-600 text-white text-sm font-semibold hover:bg-emerald-700 transition-colors disabled:opacity-60"
               >
                 <QrCode className="w-4 h-4" />
-                <span>Create Restaurant & Generate QR</span>
+                <span>{submitting ? 'Creating...' : 'Create Restaurant & Generate QR'}</span>
               </button>
             </div>
           </form>
         ) : (
           <div className="space-y-5">
+            {createdRestaurant.ownerUsername && (
+              <div className="bg-emerald-50 border border-emerald-200 rounded-xl px-4 py-3 text-xs text-emerald-950 flex flex-wrap items-center justify-between gap-2">
+                <span className="inline-flex items-center gap-1.5 font-semibold">
+                  <KeyRound className="w-3.5 h-3.5 text-emerald-700" />
+                  <span>Owner Login Ready:</span>
+                </span>
+                <span className="font-mono font-semibold text-emerald-900">
+                  {createdRestaurant.ownerUsername}
+                </span>
+              </div>
+            )}
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
               <div className="border border-slate-200 rounded-xl p-4 flex flex-col items-center text-center space-y-2.5">
                 <p className="text-xs font-semibold text-slate-900">1. Digital Menu & Voice QR</p>

@@ -1,20 +1,17 @@
 import React, { useMemo, useState } from 'react';
-import { Check, Pencil, Plus, Search, Trash2, X } from 'lucide-react';
+import { Check, Images, Pencil, Plus, Search, Trash2, X } from 'lucide-react';
 import { usePlatform } from '../context/PlatformContext';
 import { GENERATED_IMAGES } from '../data/seedData';
+import type { MenuItem } from '../types/domain';
 import {
   canRoleEditMenuPrices,
   canRoleToggleAvailability,
   formatCurrency,
+  getMenuItemPhotos,
+  normalizeDishImages,
   validateMenuItemInput,
 } from '../utils/restaurantLogic';
-
-const IMAGE_PRESETS = [
-  { label: 'Butter Chicken / Curry', url: GENERATED_IMAGES.butterChicken },
-  { label: 'Tandoori Paneer / Starter', url: GENERATED_IMAGES.paneerTikka },
-  { label: 'Truffle Pasta / Mains', url: GENERATED_IMAGES.trufflePasta },
-  { label: 'Matcha Tiramisu / Dessert', url: GENERATED_IMAGES.matchaTiramisu },
-];
+import { DishPhotoPicker } from './DishPhotoPicker';
 
 export function MenuManager() {
   const {
@@ -24,6 +21,7 @@ export function MenuManager() {
     toggleMenuItemAvailability,
     updateMenuItemPrice,
     addMenuItem,
+    updateMenuItem,
     deleteMenuItem,
   } = usePlatform();
 
@@ -36,15 +34,26 @@ export function MenuManager() {
   const [priceDraft, setPriceDraft] = useState<string>('');
   const [showAddForm, setShowAddForm] = useState(false);
 
-  // Add dish form state
+  // Add dish form state (supports multiple images)
   const [newName, setNewName] = useState('');
   const [newCategory, setNewCategory] = useState('Mains');
   const [newPrice, setNewPrice] = useState('320');
   const [newPrep, setNewPrep] = useState('15');
   const [newDesc, setNewDesc] = useState('');
   const [newVeg, setNewVeg] = useState(true);
-  const [newImage, setNewImage] = useState(IMAGE_PRESETS[0].url);
+  const [newImages, setNewImages] = useState<string[]>([GENERATED_IMAGES.butterChicken]);
   const [formError, setFormError] = useState<string | null>(null);
+
+  // Edit dish & photos modal state
+  const [editingDish, setEditingDish] = useState<MenuItem | null>(null);
+  const [editName, setEditName] = useState('');
+  const [editCategory, setEditCategory] = useState('');
+  const [editPrice, setEditPrice] = useState('');
+  const [editPrep, setEditPrep] = useState('');
+  const [editDesc, setEditDesc] = useState('');
+  const [editVeg, setEditVeg] = useState(true);
+  const [editImages, setEditImages] = useState<string[]>([]);
+  const [editError, setEditError] = useState<string | null>(null);
 
   const categories = useMemo(() => {
     const unique = Array.from(new Set(activeMenu.map((m) => m.category)));
@@ -77,6 +86,18 @@ export function MenuManager() {
     setEditingPriceId(null);
   };
 
+  const openEditDishModal = (item: MenuItem) => {
+    setEditingDish(item);
+    setEditName(item.name);
+    setEditCategory(item.category);
+    setEditPrice(String(item.price));
+    setEditPrep(String(item.prepMinutes));
+    setEditDesc(item.description);
+    setEditVeg(item.veg);
+    setEditImages(getMenuItemPhotos(item));
+    setEditError(null);
+  };
+
   const handleAddDish = (e: React.FormEvent) => {
     e.preventDefault();
     const priceNum = Number(newPrice);
@@ -93,6 +114,8 @@ export function MenuManager() {
       return;
     }
 
+    const gallery = normalizeDishImages(newImages, GENERATED_IMAGES.butterChicken);
+
     addMenuItem({
       name: newName,
       category: newCategory,
@@ -100,14 +123,52 @@ export function MenuManager() {
       description: newDesc || 'Freshly prepared to order.',
       veg: newVeg,
       prepMinutes: prepNum,
-      imageUrl: newImage,
+      imageUrl: gallery[0] ?? GENERATED_IMAGES.butterChicken,
+      images: gallery,
     });
 
     setFormError(null);
     setNewName('');
     setNewDesc('');
     setNewPrice('320');
+    setNewPrep('15');
+    setNewImages([GENERATED_IMAGES.butterChicken]);
     setShowAddForm(false);
+  };
+
+  const handleSaveEditDish = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!editingDish) return;
+
+    const priceNum = Number(editPrice);
+    const prepNum = Number(editPrep);
+    const validation = validateMenuItemInput({
+      name: editName,
+      category: editCategory,
+      price: priceNum,
+      description: editDesc,
+      prepMinutes: prepNum,
+    });
+    if (!validation.valid) {
+      setEditError(validation.error ?? 'Invalid dish details.');
+      return;
+    }
+
+    const gallery = normalizeDishImages(editImages, editingDish.imageUrl || GENERATED_IMAGES.butterChicken);
+
+    updateMenuItem(editingDish.id, {
+      name: editName,
+      category: editCategory,
+      price: priceNum,
+      description: editDesc || 'Freshly prepared to order.',
+      veg: editVeg,
+      prepMinutes: prepNum,
+      imageUrl: gallery[0] ?? GENERATED_IMAGES.butterChicken,
+      images: gallery,
+    });
+
+    setEditingDish(null);
+    setEditError(null);
   };
 
   const availableCount = activeMenu.filter((i) => i.available).length;
@@ -120,7 +181,7 @@ export function MenuManager() {
             Menu & Price Manager
           </h2>
           <p className="text-sm text-slate-500 mt-1">
-            {availableCount} available · {activeMenu.length - availableCount} sold out · Every edit updates the customer QR menu immediately.
+            {availableCount} available · {activeMenu.length - availableCount} sold out · Every edit & photo updates the customer QR menu immediately.
           </p>
         </div>
 
@@ -136,14 +197,19 @@ export function MenuManager() {
         )}
       </div>
 
-      {/* Add Dish Drawer/Panel */}
+      {/* Add Dish Drawer/Panel with Multi-Photo Upload */}
       {showAddForm && canEditPrices && (
         <form
           onSubmit={handleAddDish}
           className="bg-white border border-slate-200 rounded-xl p-5 space-y-4"
         >
           <div className="flex items-center justify-between">
-            <h3 className="text-base font-semibold text-slate-900">Add Dish to Digital Menu</h3>
+            <div>
+              <h3 className="text-base font-semibold text-slate-900">Add Dish to Digital Menu</h3>
+              <p className="text-xs text-slate-500 mt-0.5">
+                Add up to 6 photos per dish for {activeRestaurant.name}. Customers can swipe through all photos on the QR menu.
+              </p>
+            </div>
             <button
               type="button"
               onClick={() => setShowAddForm(false)}
@@ -209,7 +275,7 @@ export function MenuManager() {
           </div>
 
           <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
-            <div className="md:col-span-2">
+            <div className="md:col-span-3">
               <label htmlFor="dish-desc" className="block text-xs font-medium text-slate-700 mb-1">
                 Short Description
               </label>
@@ -237,25 +303,14 @@ export function MenuManager() {
                 className="w-full h-10 px-3 rounded-lg border border-slate-200 text-sm font-mono tabular-nums focus:outline-none focus:ring-2 focus:ring-emerald-600"
               />
             </div>
-
-            <div>
-              <label htmlFor="dish-photo" className="block text-xs font-medium text-slate-700 mb-1">
-                Photo Style
-              </label>
-              <select
-                id="dish-photo"
-                value={newImage}
-                onChange={(e) => setNewImage(e.target.value)}
-                className="w-full h-10 px-3 rounded-lg border border-slate-200 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-emerald-600"
-              >
-                {IMAGE_PRESETS.map((p) => (
-                  <option key={p.label} value={p.url}>
-                    {p.label}
-                  </option>
-                ))}
-              </select>
-            </div>
           </div>
+
+          {/* Multi-Photo Uploader */}
+          <DishPhotoPicker
+            images={newImages}
+            onChange={setNewImages}
+            idPrefix="add-dish-photos"
+          />
 
           <div className="flex flex-wrap items-center justify-between gap-4 pt-2 border-t border-slate-100">
             <label className="inline-flex items-center gap-2 text-sm text-slate-700 cursor-pointer">
@@ -338,6 +393,7 @@ export function MenuManager() {
             <tbody className="divide-y divide-slate-100 text-sm">
               {filteredMenu.map((item) => {
                 const isEditing = editingPriceId === item.id;
+                const photos = getMenuItemPhotos(item);
                 return (
                   <tr
                     key={item.id}
@@ -347,16 +403,34 @@ export function MenuManager() {
                   >
                     <td className="py-3.5 px-5">
                       <div className="flex items-center gap-3.5 min-w-[240px]">
-                        <img
-                          src={item.imageUrl}
-                          alt={item.name}
-                          referrerPolicy="no-referrer"
-                          className={`w-12 h-12 rounded-lg object-cover border border-slate-200 shrink-0 ${
-                            item.available ? '' : 'grayscale opacity-60'
-                          }`}
-                        />
+                        <div className="relative shrink-0">
+                          <img
+                            src={photos[0] ?? item.imageUrl}
+                            alt={item.name}
+                            referrerPolicy="no-referrer"
+                            className={`w-12 h-12 rounded-lg object-cover border border-slate-200 ${
+                              item.available ? '' : 'grayscale opacity-60'
+                            }`}
+                          />
+                          {photos.length > 1 && (
+                            <span
+                              title={`${photos.length} photos in gallery`}
+                              className="absolute -bottom-1.5 -right-1.5 px-1.5 py-0.5 rounded bg-slate-900 text-white text-[10px] font-mono tabular-nums font-semibold leading-none border border-white"
+                            >
+                              {photos.length}
+                            </span>
+                          )}
+                        </div>
                         <div className="min-w-0">
-                          <p className="font-semibold text-slate-900 truncate">{item.name}</p>
+                          <div className="flex items-center gap-2">
+                            <p className="font-semibold text-slate-900 truncate">{item.name}</p>
+                            {photos.length > 1 && (
+                              <span className="inline-flex items-center gap-1 text-[11px] font-medium text-emerald-700 whitespace-nowrap">
+                                <Images className="w-3 h-3" />
+                                <span>{photos.length} photos</span>
+                              </span>
+                            )}
+                          </div>
                           <p className="text-xs text-slate-500 mt-0.5 line-clamp-1">
                             {item.veg ? 'Veg' : 'Non-Veg'} · {item.prepMinutes} min ·{' '}
                             {item.description}
@@ -451,14 +525,25 @@ export function MenuManager() {
 
                     {canEditPrices && (
                       <td className="py-3.5 px-5 text-right whitespace-nowrap">
-                        <button
-                          type="button"
-                          onClick={() => deleteMenuItem(item.id)}
-                          aria-label={`Delete ${item.name}`}
-                          className="p-2 rounded-lg text-slate-400 hover:text-red-600 hover:bg-red-50 transition-colors"
-                        >
-                          <Trash2 className="w-4 h-4" />
-                        </button>
+                        <div className="inline-flex items-center gap-1.5 justify-end">
+                          <button
+                            type="button"
+                            onClick={() => openEditDishModal(item)}
+                            aria-label={`Edit dish and photos for ${item.name}`}
+                            className="inline-flex items-center gap-1 h-8 px-2.5 rounded-lg border border-slate-200 text-xs font-medium text-slate-700 hover:bg-slate-100 transition-colors"
+                          >
+                            <Images className="w-3.5 h-3.5 text-emerald-700" />
+                            <span>Edit / Photos</span>
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => deleteMenuItem(item.id)}
+                            aria-label={`Delete ${item.name}`}
+                            className="p-2 rounded-lg text-slate-400 hover:text-red-600 hover:bg-red-50 transition-colors"
+                          >
+                            <Trash2 className="w-4 h-4" />
+                          </button>
+                        </div>
                       </td>
                     )}
                   </tr>
@@ -468,6 +553,152 @@ export function MenuManager() {
           </table>
         </div>
       </div>
+
+      {/* Edit Dish & Multi-Photo Gallery Modal */}
+      {editingDish && canEditPrices && (
+        <div
+          className="fixed inset-0 z-50 bg-slate-950/50 backdrop-blur-[2px] flex items-center justify-center p-4 overflow-y-auto"
+          role="dialog"
+          aria-modal="true"
+          aria-label={`Edit ${editingDish.name}`}
+        >
+          <form
+            onSubmit={handleSaveEditDish}
+            className="bg-white border border-slate-200 rounded-2xl w-full max-w-2xl p-6 space-y-4 shadow-xl my-auto max-h-[90vh] overflow-y-auto"
+          >
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <h3 className="text-lg font-bold text-slate-900">Edit Dish & Photo Gallery</h3>
+                <p className="text-xs text-slate-500 mt-0.5">
+                  Update details or add/remove up to 6 photos for {editingDish.name}.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setEditingDish(null)}
+                aria-label="Close edit dish modal"
+                className="p-1.5 rounded-lg text-slate-400 hover:text-slate-700 hover:bg-slate-100"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            {editError && (
+              <p className="text-xs text-red-700 bg-red-50 border border-red-200 rounded-lg px-3 py-2">
+                {editError}
+              </p>
+            )}
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <div>
+                <label htmlFor="edit-dish-name" className="block text-xs font-medium text-slate-700 mb-1">
+                  Dish Name
+                </label>
+                <input
+                  id="edit-dish-name"
+                  type="text"
+                  required
+                  value={editName}
+                  onChange={(e) => setEditName(e.target.value)}
+                  className="w-full h-10 px-3 rounded-lg border border-slate-200 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-600"
+                />
+              </div>
+
+              <div>
+                <label htmlFor="edit-dish-category" className="block text-xs font-medium text-slate-700 mb-1">
+                  Category
+                </label>
+                <input
+                  id="edit-dish-category"
+                  type="text"
+                  required
+                  value={editCategory}
+                  onChange={(e) => setEditCategory(e.target.value)}
+                  className="w-full h-10 px-3 rounded-lg border border-slate-200 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-600"
+                />
+              </div>
+
+              <div>
+                <label htmlFor="edit-dish-price" className="block text-xs font-medium text-slate-700 mb-1">
+                  Price ({activeRestaurant.currency})
+                </label>
+                <input
+                  id="edit-dish-price"
+                  type="number"
+                  min={0}
+                  max={100000}
+                  required
+                  value={editPrice}
+                  onChange={(e) => setEditPrice(e.target.value)}
+                  className="w-full h-10 px-3 rounded-lg border border-slate-200 text-sm font-mono tabular-nums focus:outline-none focus:ring-2 focus:ring-emerald-600"
+                />
+              </div>
+
+              <div>
+                <label htmlFor="edit-dish-prep" className="block text-xs font-medium text-slate-700 mb-1">
+                  Prep Time (mins)
+                </label>
+                <input
+                  id="edit-dish-prep"
+                  type="number"
+                  min={1}
+                  max={180}
+                  value={editPrep}
+                  onChange={(e) => setEditPrep(e.target.value)}
+                  className="w-full h-10 px-3 rounded-lg border border-slate-200 text-sm font-mono tabular-nums focus:outline-none focus:ring-2 focus:ring-emerald-600"
+                />
+              </div>
+            </div>
+
+            <div>
+              <label htmlFor="edit-dish-desc" className="block text-xs font-medium text-slate-700 mb-1">
+                Short Description
+              </label>
+              <input
+                id="edit-dish-desc"
+                type="text"
+                value={editDesc}
+                onChange={(e) => setEditDesc(e.target.value)}
+                className="w-full h-10 px-3 rounded-lg border border-slate-200 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-600"
+              />
+            </div>
+
+            <DishPhotoPicker
+              images={editImages}
+              onChange={setEditImages}
+              idPrefix="edit-dish-photos"
+            />
+
+            <div className="flex flex-wrap items-center justify-between gap-4 pt-3 border-t border-slate-100">
+              <label className="inline-flex items-center gap-2 text-sm text-slate-700 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={editVeg}
+                  onChange={(e) => setEditVeg(e.target.checked)}
+                  className="w-4 h-4 accent-emerald-600 rounded"
+                />
+                <span>Vegetarian dish</span>
+              </label>
+
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setEditingDish(null)}
+                  className="h-9 px-4 rounded-lg border border-slate-200 text-sm font-medium text-slate-700 hover:bg-slate-50"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  className="h-9 px-4 rounded-lg bg-emerald-600 text-white text-sm font-semibold hover:bg-emerald-700"
+                >
+                  Save Changes
+                </button>
+              </div>
+            </div>
+          </form>
+        </div>
+      )}
     </div>
   );
 }

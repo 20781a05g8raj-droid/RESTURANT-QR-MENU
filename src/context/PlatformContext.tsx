@@ -2,6 +2,7 @@ import React, { createContext, useCallback, useContext, useEffect, useMemo, useR
 import { onAuthStateChanged, type User } from 'firebase/auth';
 import {
   collection,
+  deleteDoc,
   doc,
   onSnapshot,
   query,
@@ -31,6 +32,7 @@ import type {
   OrderItem,
   OrderSource,
   OrderStatus,
+  PortalSession,
   Restaurant,
   StaffMember,
   StaffRole,
@@ -42,6 +44,7 @@ import type {
 import {
   canRoleAccessTab,
   getAllowedTabsForRole,
+  normalizeDishImages,
   parseScannedRestaurantParams,
   resolvePublicQrOrigin,
   slugifyRestaurantName,
@@ -54,16 +57,22 @@ interface PersistedState {
   staffByRestaurant: Record<string, StaffMember[]>;
 }
 
-const STORAGE_KEY = 'tablepulse_platform_state_v1';
+export interface PortalAuthStatus {
+  appOwnerEmail: string;
+  adminConfigured: boolean;
+  usesEnvPassword: boolean;
+}
+
+const STORAGE_KEY = 'tablepulse_platform_state_v2';
 const QR_BASE_URL_KEY = 'tablepulse_qr_base_url_v1';
-const BROADCAST_CHANNEL = 'tablepulse_realtime_sync_v1';
+const BROADCAST_CHANNEL = 'tablepulse_realtime_sync_v2';
 
 function buildInitialState(): PersistedState {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (raw) {
       const parsed = JSON.parse(raw) as PersistedState;
-      if (Array.isArray(parsed.restaurants) && parsed.restaurants.length >= 100) {
+      if (Array.isArray(parsed.restaurants) && parsed.restaurants.length >= 1) {
         return parsed;
       }
     }
@@ -76,7 +85,7 @@ function buildInitialState(): PersistedState {
   const ordersByRestaurant: Record<string, Order[]> = {};
   const staffByRestaurant: Record<string, StaffMember[]> = {};
 
-  for (const r of restaurants.slice(0, 6)) {
+  for (const r of restaurants) {
     const menu = generateDefaultMenuForRestaurant(r.id);
     menusByRestaurant[r.id] = menu;
     ordersByRestaurant[r.id] = generateSeedOrders(r, menu);
@@ -113,6 +122,18 @@ interface PlatformContextValue {
   setWifiConnected: (connected: boolean) => void;
   addRestaurantModalOpen: boolean;
   setAddRestaurantModalOpen: (open: boolean) => void;
+  editingRestaurant: Restaurant | null;
+  setEditingRestaurant: (restaurant: Restaurant | null) => void;
+  // Portal Auth (App Owner + Per-Restaurant Owner Login)
+  portalSession: PortalSession | null;
+  portalAuthStatus: PortalAuthStatus | null;
+  portalAuthLoading: boolean;
+  guestPreviewMode: boolean;
+  setGuestPreviewMode: (enabled: boolean) => void;
+  restaurantAccountUsernames: Record<string, string>;
+  setupAppOwner: (email: string, password: string) => Promise<{ ok: boolean; error?: string }>;
+  loginPortal: (username: string, password: string) => Promise<{ ok: boolean; error?: string }>;
+  logoutPortal: () => void;
   qrPublicOrigin: string;
   isDevPreviewOrigin: boolean;
   wasQrOriginAutoConverted: boolean;
@@ -128,7 +149,26 @@ interface PlatformContextValue {
     wifiSsid: string;
     wifiPassword: string;
     wifiSecurity: WifiSecurity;
-  }) => Restaurant;
+    ownerUsername?: string;
+    ownerPassword?: string;
+  }) => Promise<{ ok: boolean; restaurant?: Restaurant; error?: string }>;
+  updateRestaurant: (
+    restaurantId: string,
+    updates: {
+      name: string;
+      city: string;
+      cuisine: string;
+      plan: SubscriptionPlan;
+      active: boolean;
+      tableCount: number;
+      wifiSsid: string;
+      wifiPassword: string;
+      wifiSecurity: WifiSecurity;
+      ownerUsername?: string;
+      ownerPassword?: string;
+    }
+  ) => Promise<{ ok: boolean; error?: string }>;
+  deleteRestaurant: (restaurantId: string) => Promise<{ ok: boolean; error?: string }>;
   updateRestaurantWifi: (
     restaurantId: string,
     wifi: { wifiSsid: string; wifiPassword: string; wifiSecurity: WifiSecurity; tableCount: number }
@@ -143,7 +183,21 @@ interface PlatformContextValue {
     veg: boolean;
     prepMinutes: number;
     imageUrl: string;
+    images?: string[];
   }) => MenuItem;
+  updateMenuItem: (
+    itemId: string,
+    updates: {
+      name: string;
+      description: string;
+      category: string;
+      price: number;
+      veg: boolean;
+      prepMinutes: number;
+      imageUrl: string;
+      images: string[];
+    }
+  ) => void;
   deleteMenuItem: (itemId: string) => void;
   placeOrder: (input: {
     tableNumber: number;
@@ -253,6 +307,19 @@ export function PlatformProvider({ children }: { children: React.ReactNode }) {
   });
   const [wifiConnected, setWifiConnected] = useState<boolean>(false);
   const [addRestaurantModalOpen, setAddRestaurantModalOpen] = useState<boolean>(false);
+  const [editingRestaurant, setEditingRestaurant] = useState<Restaurant | null>(null);
+
+  // Portal auth state (Bearer token stored strictly in React memory, never in localStorage)
+  const [authToken, setAuthToken] = useState<string | null>(null);
+  const [portalSession, setPortalSession] = useState<PortalSession | null>(null);
+  const [portalAuthStatus, setPortalAuthStatus] = useState<PortalAuthStatus | null>(null);
+  const [portalAuthLoading, setPortalAuthLoading] = useState<boolean>(true);
+  const [guestPreviewMode, setGuestPreviewMode] = useState<boolean>(() => {
+    return Boolean(new URLSearchParams(window.location.search).get('menu'));
+  });
+  const [restaurantAccountUsernames, setRestaurantAccountUsernames] = useState<
+    Record<string, string>
+  >({});
 
   const [customQrBaseUrl, setCustomQrBaseUrlState] = useState<string>(() => {
     try {
@@ -324,6 +391,136 @@ export function PlatformProvider({ children }: { children: React.ReactNode }) {
         channel.close();
       };
     }
+  }, []);
+
+  // Load server portal auth status on mount
+  useEffect(() => {
+    let active = true;
+    fetch('/api/auth/status')
+      .then((res) => res.json())
+      .then((data: PortalAuthStatus) => {
+        if (active) setPortalAuthStatus(data);
+      })
+      .catch(() => {
+        if (active) {
+          setPortalAuthStatus({
+            appOwnerEmail: 'rajensu264@gmail.com',
+            adminConfigured: false,
+            usesEnvPassword: false,
+          });
+        }
+      })
+      .finally(() => {
+        if (active) setPortalAuthLoading(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  const fetchRestaurantAccounts = useCallback(async (token: string) => {
+    try {
+      const res = await fetch('/api/auth/restaurant-accounts', {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (!res.ok) return;
+      const data = (await res.json()) as {
+        accounts?: Record<string, { username: string; updatedAt: string }>;
+      };
+      const map: Record<string, string> = {};
+      for (const [restId, info] of Object.entries(data.accounts ?? {})) {
+        map[restId] = info.username;
+      }
+      setRestaurantAccountUsernames(map);
+      setState((prev) => ({
+        ...prev,
+        restaurants: prev.restaurants.map((r) =>
+          map[r.id] ? { ...r, ownerUsername: map[r.id] } : r
+        ),
+      }));
+    } catch {
+      // ignore fetch error
+    }
+  }, []);
+
+  const applyAuthenticatedSession = useCallback(
+    (token: string, session: PortalSession) => {
+      setAuthToken(token);
+      setPortalSession(session);
+      setGuestPreviewMode(false);
+      if (session.role === 'super_admin') {
+        setActiveRoleState('super_admin');
+        setActiveTabState('fleet');
+        void fetchRestaurantAccounts(token);
+      } else if (session.role === 'owner' && session.restaurantId) {
+        setActiveRoleState('owner');
+        setActiveRestaurantId(session.restaurantId);
+        setActiveTabState('overview');
+      }
+    },
+    [fetchRestaurantAccounts]
+  );
+
+  const setupAppOwner = useCallback(
+    async (email: string, password: string): Promise<{ ok: boolean; error?: string }> => {
+      try {
+        const res = await fetch('/api/auth/setup-admin', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ email, password }),
+        });
+        const data = (await res.json()) as {
+          token?: string;
+          session?: PortalSession;
+          error?: string;
+        };
+        if (!res.ok || !data.token || !data.session) {
+          return { ok: false, error: data.error || 'Could not activate App Owner account.' };
+        }
+        setPortalAuthStatus((prev) =>
+          prev ? { ...prev, adminConfigured: true } : prev
+        );
+        applyAuthenticatedSession(data.token, data.session);
+        return { ok: true };
+      } catch {
+        return { ok: false, error: 'Network error while setting up account.' };
+      }
+    },
+    [applyAuthenticatedSession]
+  );
+
+  const loginPortal = useCallback(
+    async (username: string, password: string): Promise<{ ok: boolean; error?: string }> => {
+      try {
+        const res = await fetch('/api/auth/login', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ username, password }),
+        });
+        const data = (await res.json()) as {
+          token?: string;
+          session?: PortalSession;
+          error?: string;
+        };
+        if (!res.ok || !data.token || !data.session) {
+          return { ok: false, error: data.error || 'Invalid username or password.' };
+        }
+        applyAuthenticatedSession(data.token, data.session);
+        return { ok: true };
+      } catch {
+        return { ok: false, error: 'Network error while signing in.' };
+      }
+    },
+    [applyAuthenticatedSession]
+  );
+
+  const logoutPortal = useCallback(() => {
+    setAuthToken(null);
+    setPortalSession(null);
+    setRestaurantAccountUsernames({});
+    setAddRestaurantModalOpen(false);
+    setEditingRestaurant(null);
+    setGuestPreviewMode(false);
   }, []);
 
   // Firebase Auth + Startup Connection Validation
@@ -462,9 +659,13 @@ export function PlatformProvider({ children }: { children: React.ReactNode }) {
 
   const selectRestaurantById = useCallback(
     (id: string) => {
+      // Restaurant owner sessions are strictly scoped to their own assigned restaurant
+      if (portalSession?.role === 'owner' && portalSession.restaurantId && id !== portalSession.restaurantId) {
+        return;
+      }
       setActiveRestaurantId(id);
       setWifiConnected(false);
-      // Ensure menu/orders/staff are hydrated lazily for any of the 100+ outlets
+      // Ensure menu/orders/staff are hydrated lazily
       setState((prev) => {
         if (prev.menusByRestaurant[id]) return prev;
         const target = prev.restaurants.find((r) => r.id === id);
@@ -484,18 +685,21 @@ export function PlatformProvider({ children }: { children: React.ReactNode }) {
         };
       });
     },
-    []
+    [portalSession]
   );
 
   const setActiveRole = useCallback(
     (role: UserRole) => {
-      setActiveRoleState(role);
-      const allowed = getAllowedTabsForRole(role);
+      // Restaurant owners cannot elevate themselves to super_admin
+      const nextRole =
+        portalSession?.role === 'owner' && role === 'super_admin' ? 'owner' : role;
+      setActiveRoleState(nextRole);
+      const allowed = getAllowedTabsForRole(nextRole);
       if (!allowed.includes(activeTab)) {
         setActiveTabState(allowed[0]);
       }
     },
-    [activeTab]
+    [activeTab, portalSession]
   );
 
   const setActiveTab = useCallback(
@@ -510,7 +714,7 @@ export function PlatformProvider({ children }: { children: React.ReactNode }) {
   );
 
   const addRestaurant = useCallback(
-    (input: {
+    async (input: {
       name: string;
       city: string;
       cuisine: string;
@@ -519,11 +723,46 @@ export function PlatformProvider({ children }: { children: React.ReactNode }) {
       wifiSsid: string;
       wifiPassword: string;
       wifiSecurity: WifiSecurity;
-    }): Restaurant => {
+      ownerUsername?: string;
+      ownerPassword?: string;
+    }): Promise<{ ok: boolean; restaurant?: Restaurant; error?: string }> => {
       const now = new Date().toISOString();
       const baseSlug = slugifyRestaurantName(input.name) || 'restaurant';
       const id = `rest-${baseSlug}-${Date.now().toString(36).slice(-4)}`;
       const slug = `${baseSlug}-${Date.now().toString(36).slice(-3)}`;
+
+      const cleanOwnerUser = input.ownerUsername?.trim().toLowerCase() || '';
+      const cleanOwnerPass = input.ownerPassword || '';
+
+      if (cleanOwnerUser || cleanOwnerPass) {
+        if (!authToken || portalSession?.role !== 'super_admin') {
+          return { ok: false, error: 'Only the App Owner can set restaurant login credentials.' };
+        }
+        const credRes = await fetch('/api/auth/restaurant-accounts', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${authToken}`,
+          },
+          body: JSON.stringify({
+            restaurantId: id,
+            username: cleanOwnerUser,
+            password: cleanOwnerPass,
+          }),
+        });
+        const credData = (await credRes.json()) as {
+          account?: { username: string };
+          error?: string;
+        };
+        if (!credRes.ok) {
+          return { ok: false, error: credData.error || 'Could not save restaurant owner login.' };
+        }
+        setRestaurantAccountUsernames((prev) => ({
+          ...prev,
+          [id]: credData.account?.username ?? cleanOwnerUser,
+        }));
+      }
+
       const newRest: Restaurant = {
         id,
         slug,
@@ -531,6 +770,7 @@ export function PlatformProvider({ children }: { children: React.ReactNode }) {
         city: input.city.trim(),
         cuisine: input.cuisine.trim(),
         ownerId: user?.uid ?? 'demo-owner-1',
+        ownerUsername: cleanOwnerUser || undefined,
         plan: input.plan,
         active: true,
         tableCount: input.tableCount,
@@ -578,9 +818,166 @@ export function PlatformProvider({ children }: { children: React.ReactNode }) {
       }
 
       setActiveRestaurantId(id);
-      return newRest;
+      return { ok: true, restaurant: newRest };
     },
-    [commitState, user]
+    [authToken, commitState, portalSession, user]
+  );
+
+  const updateRestaurant = useCallback(
+    async (
+      restaurantId: string,
+      updates: {
+        name: string;
+        city: string;
+        cuisine: string;
+        plan: SubscriptionPlan;
+        active: boolean;
+        tableCount: number;
+        wifiSsid: string;
+        wifiPassword: string;
+        wifiSecurity: WifiSecurity;
+        ownerUsername?: string;
+        ownerPassword?: string;
+      }
+    ): Promise<{ ok: boolean; error?: string }> => {
+      // Restaurant owner may only edit their own restaurant
+      if (
+        portalSession?.role === 'owner' &&
+        portalSession.restaurantId &&
+        portalSession.restaurantId !== restaurantId
+      ) {
+        return { ok: false, error: 'You can only edit your own restaurant.' };
+      }
+
+      const cleanOwnerUser = updates.ownerUsername?.trim().toLowerCase() || '';
+      const cleanOwnerPass = updates.ownerPassword || '';
+      let savedUsername: string | undefined;
+
+      if (portalSession?.role === 'super_admin' && authToken && (cleanOwnerUser || cleanOwnerPass)) {
+        const credRes = await fetch('/api/auth/restaurant-accounts', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${authToken}`,
+          },
+          body: JSON.stringify({
+            restaurantId,
+            username: cleanOwnerUser,
+            password: cleanOwnerPass || undefined,
+          }),
+        });
+        const credData = (await credRes.json()) as {
+          account?: { username: string };
+          error?: string;
+        };
+        if (!credRes.ok) {
+          return {
+            ok: false,
+            error: credData.error || 'Could not update restaurant owner credentials.',
+          };
+        }
+        savedUsername = credData.account?.username ?? cleanOwnerUser;
+        setRestaurantAccountUsernames((prev) => ({ ...prev, [restaurantId]: savedUsername! }));
+      }
+
+      const now = new Date().toISOString();
+      commitState((prev) => ({
+        ...prev,
+        restaurants: prev.restaurants.map((r) =>
+          r.id === restaurantId
+            ? {
+                ...r,
+                name: updates.name.trim(),
+                city: updates.city.trim(),
+                cuisine: updates.cuisine.trim(),
+                plan: updates.plan,
+                active: updates.active,
+                tableCount: updates.tableCount,
+                wifiSsid: updates.wifiSsid.trim(),
+                wifiPassword: updates.wifiPassword,
+                wifiSecurity: updates.wifiSecurity,
+                ownerUsername: savedUsername ?? r.ownerUsername,
+                updatedAt: now,
+              }
+            : r
+        ),
+      }));
+
+      if (user && user.emailVerified) {
+        updateDoc(doc(db, 'restaurants', restaurantId), {
+          name: updates.name.trim(),
+          city: updates.city.trim(),
+          cuisine: updates.cuisine.trim(),
+          plan: updates.plan,
+          active: updates.active,
+          tableCount: updates.tableCount,
+          wifiSsid: updates.wifiSsid.trim(),
+          wifiPassword: updates.wifiPassword,
+          wifiSecurity: updates.wifiSecurity,
+          updatedAt: serverTimestamp(),
+        }).catch(() => {
+          // Seed outlets may not exist in Firestore yet
+        });
+      }
+
+      return { ok: true };
+    },
+    [authToken, commitState, portalSession, user]
+  );
+
+  const deleteRestaurant = useCallback(
+    async (restaurantId: string): Promise<{ ok: boolean; error?: string }> => {
+      if (portalSession?.role !== 'super_admin') {
+        return { ok: false, error: 'Only the App Owner can delete restaurants.' };
+      }
+      if (state.restaurants.length <= 1) {
+        return { ok: false, error: 'At least one restaurant must remain in the platform.' };
+      }
+
+      if (authToken) {
+        await fetch(`/api/auth/restaurant-accounts/${encodeURIComponent(restaurantId)}`, {
+          method: 'DELETE',
+          headers: { Authorization: `Bearer ${authToken}` },
+        }).catch(() => {
+          // ignore if account did not exist
+        });
+      }
+
+      setRestaurantAccountUsernames((prev) => {
+        const next = { ...prev };
+        delete next[restaurantId];
+        return next;
+      });
+
+      const remaining = state.restaurants.filter((r) => r.id !== restaurantId);
+      commitState((prev) => {
+        const nextMenus = { ...prev.menusByRestaurant };
+        const nextOrders = { ...prev.ordersByRestaurant };
+        const nextStaff = { ...prev.staffByRestaurant };
+        delete nextMenus[restaurantId];
+        delete nextOrders[restaurantId];
+        delete nextStaff[restaurantId];
+        return {
+          restaurants: prev.restaurants.filter((r) => r.id !== restaurantId),
+          menusByRestaurant: nextMenus,
+          ordersByRestaurant: nextOrders,
+          staffByRestaurant: nextStaff,
+        };
+      });
+
+      if (activeRestaurantId === restaurantId && remaining[0]) {
+        setActiveRestaurantId(remaining[0].id);
+      }
+
+      if (user && user.emailVerified) {
+        deleteDoc(doc(db, 'restaurants', restaurantId)).catch(() => {
+          // ignore if local-only
+        });
+      }
+
+      return { ok: true };
+    },
+    [activeRestaurantId, authToken, commitState, portalSession, state.restaurants, user]
   );
 
   const updateRestaurantWifi = useCallback(
@@ -684,9 +1081,13 @@ export function PlatformProvider({ children }: { children: React.ReactNode }) {
       veg: boolean;
       prepMinutes: number;
       imageUrl: string;
+      images?: string[];
     }): MenuItem => {
       const now = new Date().toISOString();
       const restId = activeRestaurant.id;
+      const gallery = normalizeDishImages(input.images, input.imageUrl);
+      const primaryImage = gallery[0] ?? input.imageUrl;
+
       const newItem: MenuItem = {
         id: `${restId}-dish-${Date.now().toString(36)}`,
         restaurantId: restId,
@@ -697,7 +1098,8 @@ export function PlatformProvider({ children }: { children: React.ReactNode }) {
         available: true,
         veg: input.veg,
         prepMinutes: input.prepMinutes,
-        imageUrl: input.imageUrl,
+        imageUrl: primaryImage,
+        images: gallery,
         popular: false,
         updatedAt: now,
       };
@@ -727,6 +1129,67 @@ export function PlatformProvider({ children }: { children: React.ReactNode }) {
       }
 
       return newItem;
+    },
+    [activeRestaurant.id, commitState, user]
+  );
+
+  const updateMenuItem = useCallback(
+    (
+      itemId: string,
+      updates: {
+        name: string;
+        description: string;
+        category: string;
+        price: number;
+        veg: boolean;
+        prepMinutes: number;
+        imageUrl: string;
+        images: string[];
+      }
+    ) => {
+      if (!Number.isFinite(updates.price) || updates.price < 0 || updates.price > 100000) return;
+      const now = new Date().toISOString();
+      const restId = activeRestaurant.id;
+      const gallery = normalizeDishImages(updates.images, updates.imageUrl);
+      const primaryImage = gallery[0] ?? updates.imageUrl;
+      const roundedPrice = Math.round(updates.price);
+
+      commitState((prev) => {
+        const list = prev.menusByRestaurant[restId] ?? generateDefaultMenuForRestaurant(restId);
+        const updated = list.map((item) =>
+          item.id === itemId
+            ? {
+                ...item,
+                name: updates.name.trim(),
+                description: updates.description.trim(),
+                category: updates.category.trim(),
+                price: roundedPrice,
+                veg: updates.veg,
+                prepMinutes: updates.prepMinutes,
+                imageUrl: primaryImage,
+                images: gallery,
+                updatedAt: now,
+              }
+            : item
+        );
+        return {
+          ...prev,
+          menusByRestaurant: { ...prev.menusByRestaurant, [restId]: updated },
+        };
+      });
+
+      if (user && user.emailVerified) {
+        updateDoc(doc(db, 'restaurants', restId, 'menuItems', itemId), {
+          name: updates.name.trim(),
+          description: updates.description.trim(),
+          category: updates.category.trim(),
+          price: roundedPrice,
+          veg: updates.veg,
+          prepMinutes: updates.prepMinutes,
+          imageUrl: primaryImage,
+          updatedAt: serverTimestamp(),
+        }).catch(() => {});
+      }
     },
     [activeRestaurant.id, commitState, user]
   );
@@ -1001,16 +1464,30 @@ export function PlatformProvider({ children }: { children: React.ReactNode }) {
     setWifiConnected,
     addRestaurantModalOpen,
     setAddRestaurantModalOpen,
+    editingRestaurant,
+    setEditingRestaurant,
+    portalSession,
+    portalAuthStatus,
+    portalAuthLoading,
+    guestPreviewMode,
+    setGuestPreviewMode,
+    restaurantAccountUsernames,
+    setupAppOwner,
+    loginPortal,
+    logoutPortal,
     qrPublicOrigin: resolvedQrOrigin.origin,
     isDevPreviewOrigin: resolvedQrOrigin.isDevPreview,
     wasQrOriginAutoConverted: resolvedQrOrigin.wasAutoConverted,
     customQrBaseUrl,
     setCustomQrBaseUrl,
     addRestaurant,
+    updateRestaurant,
+    deleteRestaurant,
     updateRestaurantWifi,
     toggleMenuItemAvailability,
     updateMenuItemPrice,
     addMenuItem,
+    updateMenuItem,
     deleteMenuItem,
     placeOrder,
     updateOrderStatus,

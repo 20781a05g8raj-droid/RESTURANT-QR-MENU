@@ -9,12 +9,12 @@ const TAB_TITLES: Record<WorkspaceTab, string> = {
   menu: 'Menu & Price Manager',
   qr_wifi: 'QR Code & Instant WiFi Studio',
   staff: 'Staff & Role Permissions',
-  fleet: 'Platform Fleet (100+ Restaurants)',
+  fleet: 'All Managed Restaurants',
   customer_menu: 'Customer Digital QR Menu',
 };
 
-const ROLE_OPTIONS: Array<{ value: UserRole; label: string }> = [
-  { value: 'super_admin', label: 'SaaS Owner (100+ Outlets)' },
+const ALL_ROLE_OPTIONS: Array<{ value: UserRole; label: string }> = [
+  { value: 'super_admin', label: 'App Owner (Master)' },
   { value: 'owner', label: 'Restaurant Owner' },
   { value: 'manager', label: 'Store Manager' },
   { value: 'chef', label: 'Kitchen Chef' },
@@ -32,35 +32,40 @@ export function TopHeader({ onOpenMobileNav }: { onOpenMobileNav: () => void }) 
     activeTab,
     setActiveTab,
     setAddRestaurantModalOpen,
-    user,
-    handleSignIn,
-    handleSignOut,
+    portalSession,
+    logoutPortal,
+    setGuestPreviewMode,
   } = usePlatform();
 
-  const canAddRestaurant =
-    activeRole === 'super_admin' || activeRole === 'owner' || activeRole === 'manager';
+  const isSuperAdmin = portalSession?.role === 'super_admin';
+  const isGuestOnly = !portalSession;
+  const availableRoles = isSuperAdmin
+    ? ALL_ROLE_OPTIONS
+    : ALL_ROLE_OPTIONS.filter((opt) => opt.value !== 'super_admin');
 
   return (
     <header className="h-16 bg-white border-b border-slate-200 px-4 lg:px-8 flex items-center justify-between gap-3 sticky top-0 z-30 no-print">
       <div className="flex items-center gap-3 min-w-0">
-        <button
-          type="button"
-          onClick={onOpenMobileNav}
-          aria-label="Open navigation menu"
-          className="lg:hidden p-2 rounded-lg text-slate-600 hover:bg-slate-100 shrink-0"
-        >
-          <Menu className="w-5 h-5" />
-        </button>
+        {!isGuestOnly && (
+          <button
+            type="button"
+            onClick={onOpenMobileNav}
+            aria-label="Open navigation menu"
+            className="lg:hidden p-2 rounded-lg text-slate-600 hover:bg-slate-100 shrink-0"
+          >
+            <Menu className="w-5 h-5" />
+          </button>
+        )}
 
         <div className="flex items-center gap-2 text-sm min-w-0">
           <h1 className="font-semibold text-slate-900 truncate">
-            {TAB_TITLES[activeTab]}
+            {isGuestOnly ? activeRestaurant.name : TAB_TITLES[activeTab]}
           </h1>
         </div>
       </div>
 
       <div className="flex items-center gap-2 shrink-0">
-        {activeRole !== 'customer' && (
+        {isSuperAdmin && activeRole !== 'customer' && (
           <label className="hidden xl:flex items-center gap-2 text-xs text-slate-500">
             <span className="sr-only">Switch active restaurant</span>
             <select
@@ -69,7 +74,7 @@ export function TopHeader({ onOpenMobileNav }: { onOpenMobileNav: () => void }) 
               onChange={(e) => selectRestaurantById(e.target.value)}
               className="h-9 px-2.5 rounded-lg border border-slate-200 bg-slate-50 text-xs font-medium text-slate-800 max-w-[195px] focus:outline-none focus:ring-2 focus:ring-emerald-600"
             >
-              {restaurants.slice(0, 25).map((r) => (
+              {restaurants.map((r) => (
                 <option key={r.id} value={r.id}>
                   {r.name} ({r.city})
                 </option>
@@ -78,23 +83,25 @@ export function TopHeader({ onOpenMobileNav }: { onOpenMobileNav: () => void }) 
           </label>
         )}
 
-        <label className="hidden md:flex items-center text-xs text-slate-500">
-          <span className="sr-only">Switch workspace role</span>
-          <select
-            aria-label="Switch role"
-            value={activeRole}
-            onChange={(e) => setActiveRole(e.target.value as UserRole)}
-            className="h-9 px-2.5 rounded-lg border border-slate-200 bg-white text-xs font-medium text-slate-800 focus:outline-none focus:ring-2 focus:ring-emerald-600"
-          >
-            {ROLE_OPTIONS.map((opt) => (
-              <option key={opt.value} value={opt.value}>
-                {opt.label}
-              </option>
-            ))}
-          </select>
-        </label>
+        {!isGuestOnly && (
+          <label className="hidden md:flex items-center text-xs text-slate-500">
+            <span className="sr-only">Preview workspace role</span>
+            <select
+              aria-label="Switch role"
+              value={activeRole}
+              onChange={(e) => setActiveRole(e.target.value as UserRole)}
+              className="h-9 px-2.5 rounded-lg border border-slate-200 bg-white text-xs font-medium text-slate-800 focus:outline-none focus:ring-2 focus:ring-emerald-600"
+            >
+              {availableRoles.map((opt) => (
+                <option key={opt.value} value={opt.value}>
+                  {opt.label}
+                </option>
+              ))}
+            </select>
+          </label>
+        )}
 
-        {canAddRestaurant && (
+        {isSuperAdmin && (
           <button
             type="button"
             onClick={() => setAddRestaurantModalOpen(true)}
@@ -105,7 +112,7 @@ export function TopHeader({ onOpenMobileNav }: { onOpenMobileNav: () => void }) 
           </button>
         )}
 
-        {activeTab !== 'qr_wifi' && activeRole !== 'customer' && activeRole !== 'chef' && (
+        {!isGuestOnly && activeTab !== 'qr_wifi' && activeRole !== 'customer' && activeRole !== 'chef' && (
           <button
             type="button"
             onClick={() => setActiveTab('qr_wifi')}
@@ -116,7 +123,7 @@ export function TopHeader({ onOpenMobileNav }: { onOpenMobileNav: () => void }) 
           </button>
         )}
 
-        {activeTab !== 'customer_menu' && (
+        {!isGuestOnly && activeTab !== 'customer_menu' && (
           <button
             type="button"
             onClick={() => setActiveTab('customer_menu')}
@@ -128,25 +135,25 @@ export function TopHeader({ onOpenMobileNav }: { onOpenMobileNav: () => void }) 
           </button>
         )}
 
-        {user ? (
+        {portalSession ? (
           <button
             type="button"
-            onClick={handleSignOut}
-            title={user.email ?? 'Signed in'}
+            onClick={logoutPortal}
+            title={`Signed in as ${portalSession.username}`}
             aria-label="Sign out"
-            className="inline-flex items-center gap-1.5 h-9 px-2.5 rounded-lg border border-slate-200 text-xs font-medium text-slate-700 hover:bg-slate-50 transition-colors whitespace-nowrap shrink-0"
+            className="inline-flex items-center gap-1.5 h-9 px-3 rounded-lg border border-slate-200 text-xs font-medium text-slate-700 hover:bg-slate-50 transition-colors whitespace-nowrap shrink-0"
           >
             <LogOut className="w-3.5 h-3.5" />
+            <span className="hidden xl:inline">Sign Out</span>
           </button>
         ) : (
           <button
             type="button"
-            onClick={handleSignIn}
-            aria-label="Sign in with Google for Cloud Sync"
-            className="inline-flex items-center gap-1.5 h-9 px-3 rounded-lg border border-slate-200 text-xs font-medium text-slate-700 hover:bg-slate-50 transition-colors whitespace-nowrap shrink-0"
+            onClick={() => setGuestPreviewMode(false)}
+            className="inline-flex items-center gap-1.5 h-9 px-3 rounded-lg border border-slate-200 text-xs font-semibold text-slate-800 hover:bg-slate-50 transition-colors whitespace-nowrap shrink-0"
           >
-            <LogIn className="w-3.5 h-3.5" />
-            <span className="hidden xl:inline">Cloud Sync</span>
+            <LogIn className="w-3.5 h-3.5 text-emerald-700" />
+            <span>Owner Login</span>
           </button>
         )}
       </div>
