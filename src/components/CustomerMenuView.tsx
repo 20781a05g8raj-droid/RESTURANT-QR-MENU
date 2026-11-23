@@ -31,10 +31,6 @@ import { LiveVoiceOrderDrawer } from './LiveVoiceOrderDrawer';
 
 export function CustomerMenuView() {
   const {
-    user,
-    cloudSyncError,
-    handleSignIn,
-    handleRedirectSignIn,
     activeRestaurant,
     activeMenu,
     activeOrders,
@@ -54,6 +50,7 @@ export function CustomerMenuView() {
   const [searchQuery, setSearchQuery] = useState('');
   const [cart, setCart] = useState<Record<string, number>>({});
   const [customerName, setCustomerName] = useState('');
+  const [nameError, setNameError] = useState<string | null>(null);
   const [orderNotes, setOrderNotes] = useState('');
   const [cartOpen, setCartOpen] = useState(false);
   const [voiceOpen, setVoiceOpen] = useState(false);
@@ -158,9 +155,15 @@ export function CustomerMenuView() {
 
   const submitOrder = (source: 'qr' | 'voice', overrideNotes?: string) => {
     if (cartItems.length === 0) return;
+    const trimmedName = customerName.trim();
+    if (source === 'qr' && trimmedName.length < 2) {
+      setNameError('Please enter your name so the waiter can serve your table.');
+      return;
+    }
+    setNameError(null);
     const created = placeOrder({
       tableNumber: customerTableNumber,
-      customerName: customerName || `Table ${customerTableNumber} Guest`,
+      customerName: trimmedName || `Table ${customerTableNumber} Guest`,
       items: cartItems,
       source,
       notes: overrideNotes ?? orderNotes,
@@ -365,7 +368,7 @@ export function CustomerMenuView() {
             <div>
               <p className="text-xs font-medium text-emerald-700">Live Order Status</p>
               <h3 className="text-base font-bold text-slate-900">
-                {trackedOrder.orderNumber} · Table {trackedOrder.tableNumber}
+                {trackedOrder.orderNumber} · Table {trackedOrder.tableNumber} · {trackedOrder.customerName}
               </h3>
             </div>
             <span className="font-mono tabular-nums text-sm font-semibold text-slate-900">
@@ -742,19 +745,53 @@ export function CustomerMenuView() {
             </ul>
 
             <div className="space-y-3 pt-2 border-t border-slate-100">
-              <div>
-                <label htmlFor="guest-name-input" className="block text-xs font-medium text-slate-700 mb-1">
-                  Your Name (optional)
-                </label>
-                <input
-                  id="guest-name-input"
-                  type="text"
-                  value={customerName}
-                  onChange={(e) => setCustomerName(e.target.value)}
-                  placeholder="e.g. Aarav"
-                  className="w-full h-10 px-3 rounded-lg border border-slate-200 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-600"
-                />
+              <div className="grid grid-cols-3 gap-3">
+                <div>
+                  <label htmlFor="guest-table-select" className="block text-xs font-medium text-slate-700 mb-1">
+                    Table No.
+                  </label>
+                  <select
+                    id="guest-table-select"
+                    value={customerTableNumber}
+                    onChange={(e) => setCustomerTableNumber(Number(e.target.value))}
+                    className="w-full h-10 px-2.5 rounded-lg border border-slate-200 bg-white text-sm font-mono font-semibold text-slate-900 focus:outline-none focus:ring-2 focus:ring-emerald-600"
+                  >
+                    {Array.from(
+                      { length: Math.max(1, Math.min(activeRestaurant.tableCount, 250)) },
+                      (_, i) => i + 1
+                    ).map((n) => (
+                      <option key={n} value={n}>
+                        Table {n}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <div className="col-span-2">
+                  <label htmlFor="guest-name-input" className="block text-xs font-medium text-slate-700 mb-1">
+                    Your Name <span className="text-red-500">*</span>
+                  </label>
+                  <input
+                    id="guest-name-input"
+                    type="text"
+                    required
+                    value={customerName}
+                    onChange={(e) => {
+                      setCustomerName(e.target.value);
+                      if (nameError) setNameError(null);
+                    }}
+                    placeholder="e.g. Rahul / Aarav"
+                    className={`w-full h-10 px-3 rounded-lg border text-sm focus:outline-none focus:ring-2 focus:ring-emerald-600 ${
+                      nameError ? 'border-red-400 bg-red-50/40' : 'border-slate-200'
+                    }`}
+                  />
+                </div>
               </div>
+              {nameError && (
+                <p role="alert" className="text-xs text-red-600 font-medium">
+                  {nameError}
+                </p>
+              )}
 
               <div>
                 <label htmlFor="guest-notes-input" className="block text-xs font-medium text-slate-700 mb-1">
@@ -778,41 +815,9 @@ export function CustomerMenuView() {
               </span>
             </div>
 
-            {user && user.emailVerified ? (
-              <p className="text-xs text-emerald-700 bg-emerald-50 border border-emerald-200 rounded-lg px-3 py-2">
-                Connected as <span className="font-mono">{user.email}</span> — your order will appear live on the restaurant kitchen screen.
-              </p>
-            ) : (
-              <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 space-y-2">
-                <p className="text-xs text-amber-900">
-                  Sign in with Google (1 tap) so your order goes live directly to{' '}
-                  <span className="font-semibold">{activeRestaurant.name}</span>&apos;s kitchen dashboard.
-                </p>
-                <div className="flex flex-wrap items-center gap-2">
-                  <button
-                    type="button"
-                    onClick={() => void handleSignIn()}
-                    className="h-8 px-3 rounded-lg bg-slate-900 text-white text-xs font-semibold hover:bg-slate-800 transition-colors"
-                  >
-                    Sign in with Google
-                  </button>
-                  {cloudSyncError &&
-                    typeof window !== 'undefined' &&
-                    window.self === window.top && (
-                      <button
-                        type="button"
-                        onClick={() => void handleRedirectSignIn()}
-                        className="h-8 px-3 rounded-lg border border-amber-300 bg-white text-amber-900 text-xs font-semibold hover:bg-amber-100 transition-colors"
-                      >
-                        Use Redirect Sign-In
-                      </button>
-                    )}
-                </div>
-                {cloudSyncError && (
-                  <p className="text-[11px] text-red-700">{cloudSyncError}</p>
-                )}
-              </div>
-            )}
+            <p className="text-xs text-emerald-800 bg-emerald-50 border border-emerald-200 rounded-lg px-3 py-2">
+              No sign-in needed — your order for <span className="font-semibold">Table {customerTableNumber}</span> goes straight to <span className="font-semibold">{activeRestaurant.name}</span>&apos;s live kitchen screen.
+            </p>
 
             <button
               type="button"

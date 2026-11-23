@@ -42,3 +42,12 @@ test('firestore.rules covers every collection defined in firebase-blueprint.json
   assert.match(rulesSource, /match \/orders\/\{orderId\}/);
   assert.match(rulesSource, /match \/staff\/\{staffId\}/);
 });
+
+test('firestore.rules allows strictly validated guest QR/voice order creation while keeping order reads/updates private', () => {
+  assert.match(rulesSource, /function isGuestOrderUid\(uid\)/);
+  assert.match(rulesSource, /incoming\(\)\.source in \['qr', 'voice'\]/);
+  assert.match(rulesSource, /restaurantDoc\(restaurantId\)\.data\.active == true/);
+  assert.match(rulesSource, /incoming\(\)\.tableNumber <= restaurantDoc\(restaurantId\)\.data\.tableCount/);
+  assert.match(rulesSource, /allow get: if isVerifiedUser\(\)/);
+  assert.match(rulesSource, /allow update: if isVerifiedUser\(\)/);
+});

@@ -20,6 +20,10 @@ service cloud.firestore {
       return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
     }
 
+    function isGuestOrderUid(uid) {
+      return uid is string && uid.size() >= 12 && uid.size() <= 80 && uid.matches('^guest-[a-zA-Z0-9_\\-]+$');
+    }
+
     function incoming() {
       return request.resource.data;
     }
@@ -269,15 +273,25 @@ service cloud.firestore {
           )
         );
 
-        allow create: if isVerifiedUser() &&
-          isValidId(restaurantId) &&
+        // Allows dine-in QR/Voice customers to place orders directly with Table # & Name without sign-in,
+        // while strictly validating schema, active restaurant, table range, pending status, and server time.
+        allow create: if isValidId(restaurantId) &&
           isValidId(orderId) &&
           isValidOrder(incoming(), restaurantId) &&
-          incoming().customerUid == request.auth.uid &&
           incoming().status == 'pending' &&
           incoming().createdAt == request.time &&
           incoming().updatedAt == request.time &&
+          (
+            (isVerifiedUser() && incoming().customerUid == request.auth.uid) ||
+            (
+              request.auth == null &&
+              incoming().source in ['qr', 'voice'] &&
+              isGuestOrderUid(incoming().customerUid)
+            )
+          ) &&
           restaurantExists(restaurantId) &&
+          restaurantDoc(restaurantId).data.active == true &&
+          incoming().tableNumber <= restaurantDoc(restaurantId).data.tableCount &&
           incoming().restaurantOwnerId == restaurantDoc(restaurantId).data.ownerId;
 
         allow update: if isVerifiedUser() &&

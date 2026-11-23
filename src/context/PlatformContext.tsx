@@ -1764,19 +1764,25 @@ export function PlatformProvider({ children }: { children: React.ReactNode }) {
       const restId = activeRestaurant.id;
       const totalAmount = input.items.reduce((sum, i) => sum + i.price * i.quantity, 0);
       const orderNum = `ORD-${Math.floor(410 + Math.random() * 580)}`;
+      const randomSuffix = Math.random().toString(36).slice(2, 8).padEnd(6, 'x');
+      const guestUid = `guest-${Date.now().toString(36)}-${randomSuffix}`;
+      const isSignedInVerified = Boolean(user && user.emailVerified);
+      const effectiveUid = isSignedInVerified && user ? user.uid : guestUid;
+      const safeSource: OrderSource =
+        !isSignedInVerified && input.source === 'staff' ? 'qr' : input.source;
 
       const newOrder: Order = {
-        id: `${restId}-ord-${Date.now().toString(36)}`,
+        id: `${restId}-ord-${Date.now().toString(36)}-${randomSuffix.slice(0, 4)}`,
         restaurantId: restId,
         restaurantOwnerId: activeRestaurant.ownerId,
         orderNumber: orderNum,
         tableNumber: input.tableNumber,
         customerName: input.customerName.trim() || `Table ${input.tableNumber} Guest`,
-        customerUid: user?.uid ?? `guest-${Date.now().toString(36)}`,
+        customerUid: effectiveUid,
         items: input.items.slice(0, 30),
         totalAmount,
         status: 'pending',
-        source: input.source,
+        source: safeSource,
         notes: input.notes.trim().slice(0, 240),
         createdAt: now,
         updatedAt: now,
@@ -1804,25 +1810,40 @@ export function PlatformProvider({ children }: { children: React.ReactNode }) {
         };
       });
 
-      if (user && user.emailVerified) {
+      // Sync directly to Cloud Firestore for both signed-in users and guest QR/Voice diners (no sign-in required)
+      if (isSafeFirestoreId(restId)) {
         const orderPath = `restaurants/${restId}/orders/${newOrder.id}`;
         void (async () => {
           try {
             const restSnap = await getDoc(doc(db, 'restaurants', restId));
             let parentOwnerId: string | null = null;
+            let parentTableCount = activeRestaurant.tableCount || 250;
             if (restSnap.exists()) {
-              parentOwnerId = String(restSnap.data().ownerId ?? '');
-            } else if (user.email === '20781a05g8raj@gmail.com') {
+              const restData = restSnap.data();
+              if (restData.active === false) {
+                setCloudSyncError('This restaurant is currently not accepting live orders.');
+                return;
+              }
+              parentOwnerId = String(restData.ownerId ?? '');
+              if (typeof restData.tableCount === 'number' && restData.tableCount >= 1) {
+                parentTableCount = restData.tableCount;
+              }
+            } else if (isSignedInVerified && user?.email === '20781a05g8raj@gmail.com') {
               parentOwnerId = await ensureRestaurantInFirestore(activeRestaurant);
             }
             if (!parentOwnerId) {
-              setCloudSyncError(
-                'This restaurant is not synced to Cloud Firestore yet. Ask the owner to click "Sync All to Cloud DB".'
-              );
               return;
             }
+            const clampedTableNumber = Math.max(
+              1,
+              Math.min(Math.round(newOrder.tableNumber), parentTableCount)
+            );
+            const cloudOrder = {
+              ...newOrder,
+              tableNumber: clampedTableNumber,
+            };
             await setDoc(doc(db, 'restaurants', restId, 'orders', newOrder.id), {
-              ...buildFirestoreOrderFields(newOrder, restId, parentOwnerId, user.uid),
+              ...buildFirestoreOrderFields(cloudOrder, restId, parentOwnerId, effectiveUid),
               createdAt: serverTimestamp(),
               updatedAt: serverTimestamp(),
             });
