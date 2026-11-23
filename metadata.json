@@ -1,0 +1,6 @@
+{
+  "name": "TablePulse",
+  "description": "Multi-restaurant QR digital menu, instant WiFi auto-connect, live voice ordering, and real-time kitchen & sales analytics platform.",
+  "requestFramePermissions": ["microphone"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

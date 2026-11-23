@@ -1,0 +1,116 @@
+{
+  "entities": {
+    "AdminRecord": {
+      "title": "AdminRecord",
+      "description": "Platform super-admin user identifier for multi-restaurant SaaS management.",
+      "type": "object",
+      "properties": {
+        "email": { "type": "string", "format": "email", "maxLength": 160 },
+        "role": { "type": "string", "enum": ["super_admin"] },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["email", "role", "createdAt"]
+    },
+    "Restaurant": {
+      "title": "Restaurant",
+      "description": "A tenant restaurant enrolled on TablePulse with QR menu and WiFi configuration.",
+      "type": "object",
+      "properties": {
+        "slug": { "type": "string", "minLength": 2, "maxLength": 80, "pattern": "^[a-z0-9-]+$" },
+        "name": { "type": "string", "minLength": 2, "maxLength": 120 },
+        "city": { "type": "string", "minLength": 2, "maxLength": 80 },
+        "cuisine": { "type": "string", "minLength": 2, "maxLength": 80 },
+        "ownerId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "plan": { "type": "string", "enum": ["Starter", "Growth", "Enterprise"] },
+        "active": { "type": "boolean" },
+        "tableCount": { "type": "integer" },
+        "wifiSsid": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "wifiPassword": { "type": "string", "minLength": 0, "maxLength": 64 },
+        "wifiSecurity": { "type": "string", "enum": ["WPA", "WEP", "nopass"] },
+        "currency": { "type": "string", "enum": ["INR", "USD"] },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["slug", "name", "city", "cuisine", "ownerId", "plan", "active", "tableCount", "wifiSsid", "wifiPassword", "wifiSecurity", "currency", "createdAt", "updatedAt"]
+    },
+    "MenuItem": {
+      "title": "MenuItem",
+      "description": "A dish on a restaurant's digital QR menu with real-time price and availability.",
+      "type": "object",
+      "properties": {
+        "restaurantId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "name": { "type": "string", "minLength": 2, "maxLength": 100 },
+        "description": { "type": "string", "maxLength": 320 },
+        "category": { "type": "string", "minLength": 2, "maxLength": 60 },
+        "price": { "type": "number" },
+        "available": { "type": "boolean" },
+        "veg": { "type": "boolean" },
+        "prepMinutes": { "type": "integer" },
+        "imageUrl": { "type": "string", "maxLength": 400 },
+        "popular": { "type": "boolean" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["restaurantId", "name", "description", "category", "price", "available", "veg", "prepMinutes", "imageUrl", "popular", "updatedAt"]
+    },
+    "Order": {
+      "title": "Order",
+      "description": "A live customer dine-in order placed via QR menu, voice ordering, or staff.",
+      "type": "object",
+      "properties": {
+        "restaurantId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "restaurantOwnerId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "orderNumber": { "type": "string", "minLength": 2, "maxLength": 32 },
+        "tableNumber": { "type": "integer" },
+        "customerName": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "customerUid": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "items": { "type": "array" },
+        "totalAmount": { "type": "number" },
+        "status": { "type": "string", "enum": ["pending", "preparing", "ready", "served", "cancelled"] },
+        "source": { "type": "string", "enum": ["qr", "voice", "staff"] },
+        "notes": { "type": "string", "maxLength": 240 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["restaurantId", "restaurantOwnerId", "orderNumber", "tableNumber", "customerName", "customerUid", "items", "totalAmount", "status", "source", "notes", "createdAt", "updatedAt"]
+    },
+    "StaffMember": {
+      "title": "StaffMember",
+      "description": "Role-based staff record for a restaurant (contains PII email, isolated to owner/admin/self).",
+      "type": "object",
+      "properties": {
+        "restaurantId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "restaurantOwnerId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "userId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "name": { "type": "string", "minLength": 2, "maxLength": 100 },
+        "email": { "type": "string", "format": "email", "maxLength": 160 },
+        "role": { "type": "string", "enum": ["owner", "manager", "chef", "waiter"] },
+        "active": { "type": "boolean" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["restaurantId", "restaurantOwnerId", "userId", "name", "email", "role", "active", "createdAt", "updatedAt"]
+    }
+  },
+  "firestore": {
+    "/admins/{userId}": {
+      "schema": { "$ref": "#/entities/AdminRecord" },
+      "description": "Platform super-admin lookup documents."
+    },
+    "/restaurants/{restaurantId}": {
+      "schema": { "$ref": "#/entities/Restaurant" },
+      "description": "Top-level multi-tenant restaurant profiles including WiFi and plan settings."
+    },
+    "/restaurants/{restaurantId}/menuItems/{itemId}": {
+      "schema": { "$ref": "#/entities/MenuItem" },
+      "description": "Real-time digital menu dishes for each restaurant."
+    },
+    "/restaurants/{restaurantId}/orders/{orderId}": {
+      "schema": { "$ref": "#/entities/Order" },
+      "description": "Live kitchen and table orders for each restaurant."
+    },
+    "/restaurants/{restaurantId}/staff/{staffId}": {
+      "schema": { "$ref": "#/entities/StaffMember" },
+      "description": "Role-based staff roster for each restaurant with isolated PII."
+    }
+  }
+}

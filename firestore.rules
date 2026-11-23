@@ -1,0 +1,355 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Pillar 0: Global default-deny safety net
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Core primitives
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isVerifiedUser() {
+      return isSignedIn() && request.auth.token.email_verified == true;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    // Zero-lookup bootstrapped admin check (safe for list queries)
+    function isBootstrappedAdmin() {
+      return isVerifiedUser() && request.auth.token.email == '20781a05g8raj@gmail.com';
+    }
+
+    // Full admin check for single-document reads/writes
+    function isAdmin() {
+      return isBootstrappedAdmin() || (
+        isVerifiedUser() &&
+        exists(/databases/$(database)/documents/admins/$(request.auth.uid))
+      );
+    }
+
+    function restaurantDoc(restaurantId) {
+      return get(/databases/$(database)/documents/restaurants/$(restaurantId));
+    }
+
+    function restaurantExists(restaurantId) {
+      return exists(/databases/$(database)/documents/restaurants/$(restaurantId));
+    }
+
+    function isRestaurantOwner(restaurantId) {
+      return isVerifiedUser() &&
+        restaurantExists(restaurantId) &&
+        restaurantDoc(restaurantId).data.ownerId == request.auth.uid;
+    }
+
+    function isRestaurantStaff(restaurantId) {
+      return isVerifiedUser() &&
+        exists(/databases/$(database)/documents/restaurants/$(restaurantId)/staff/$(request.auth.uid)) &&
+        get(/databases/$(database)/documents/restaurants/$(restaurantId)/staff/$(request.auth.uid)).data.active == true;
+    }
+
+    function isRestaurantManagerOrOwner(restaurantId) {
+      return isAdmin() || isRestaurantOwner(restaurantId) || (
+        isRestaurantStaff(restaurantId) &&
+        get(/databases/$(database)/documents/restaurants/$(restaurantId)/staff/$(request.auth.uid)).data.role in ['owner', 'manager']
+      );
+    }
+
+    // Pillar 2: Standalone Validation Blueprints
+    function isValidRestaurant(data) {
+      return data.keys().hasAll([
+        'slug', 'name', 'city', 'cuisine', 'ownerId', 'plan', 'active',
+        'tableCount', 'wifiSsid', 'wifiPassword', 'wifiSecurity', 'currency',
+        'createdAt', 'updatedAt'
+      ]) &&
+      data.keys().hasOnly([
+        'slug', 'name', 'city', 'cuisine', 'ownerId', 'plan', 'active',
+        'tableCount', 'wifiSsid', 'wifiPassword', 'wifiSecurity', 'currency',
+        'createdAt', 'updatedAt'
+      ]) &&
+      data.slug is string && data.slug.size() >= 2 && data.slug.size() <= 80 && data.slug.matches('^[a-z0-9-]+$') &&
+      data.name is string && data.name.size() >= 2 && data.name.size() <= 120 &&
+      data.city is string && data.city.size() >= 2 && data.city.size() <= 80 &&
+      data.cuisine is string && data.cuisine.size() >= 2 && data.cuisine.size() <= 80 &&
+      isValidId(data.ownerId) &&
+      data.plan in ['Starter', 'Growth', 'Enterprise'] &&
+      data.active is bool &&
+      data.tableCount is int && data.tableCount >= 1 && data.tableCount <= 250 &&
+      data.wifiSsid is string && data.wifiSsid.size() >= 1 && data.wifiSsid.size() <= 64 &&
+      data.wifiPassword is string && data.wifiPassword.size() <= 64 &&
+      data.wifiSecurity in ['WPA', 'WEP', 'nopass'] &&
+      data.currency in ['INR', 'USD'] &&
+      data.createdAt is timestamp &&
+      data.updatedAt is timestamp;
+    }
+
+    function isValidMenuItem(data, restaurantId) {
+      return data.keys().hasAll([
+        'restaurantId', 'name', 'description', 'category', 'price',
+        'available', 'veg', 'prepMinutes', 'imageUrl', 'popular', 'updatedAt'
+      ]) &&
+      data.keys().hasOnly([
+        'restaurantId', 'name', 'description', 'category', 'price',
+        'available', 'veg', 'prepMinutes', 'imageUrl', 'popular', 'updatedAt'
+      ]) &&
+      isValidId(data.restaurantId) &&
+      data.restaurantId == restaurantId &&
+      data.name is string && data.name.size() >= 2 && data.name.size() <= 100 &&
+      data.description is string && data.description.size() <= 320 &&
+      data.category is string && data.category.size() >= 2 && data.category.size() <= 60 &&
+      (data.price is int || data.price is float) && data.price >= 0 && data.price <= 100000 &&
+      data.available is bool &&
+      data.veg is bool &&
+      data.prepMinutes is int && data.prepMinutes >= 1 && data.prepMinutes <= 180 &&
+      data.imageUrl is string && data.imageUrl.size() <= 400 &&
+      data.popular is bool &&
+      data.updatedAt is timestamp;
+    }
+
+    function isValidOrder(data, restaurantId) {
+      return data.keys().hasAll([
+        'restaurantId', 'restaurantOwnerId', 'orderNumber', 'tableNumber',
+        'customerName', 'customerUid', 'items', 'totalAmount', 'status',
+        'source', 'notes', 'createdAt', 'updatedAt'
+      ]) &&
+      data.keys().hasOnly([
+        'restaurantId', 'restaurantOwnerId', 'orderNumber', 'tableNumber',
+        'customerName', 'customerUid', 'items', 'totalAmount', 'status',
+        'source', 'notes', 'createdAt', 'updatedAt'
+      ]) &&
+      isValidId(data.restaurantId) &&
+      data.restaurantId == restaurantId &&
+      isValidId(data.restaurantOwnerId) &&
+      data.orderNumber is string && data.orderNumber.size() >= 2 && data.orderNumber.size() <= 32 &&
+      data.tableNumber is int && data.tableNumber >= 1 && data.tableNumber <= 250 &&
+      data.customerName is string && data.customerName.size() >= 1 && data.customerName.size() <= 80 &&
+      isValidId(data.customerUid) &&
+      data.items is list && data.items.size() >= 1 && data.items.size() <= 30 &&
+      data.items[0] is map &&
+      (data.totalAmount is int || data.totalAmount is float) && data.totalAmount >= 0 && data.totalAmount <= 500000 &&
+      data.status in ['pending', 'preparing', 'ready', 'served', 'cancelled'] &&
+      data.source in ['qr', 'voice', 'staff'] &&
+      data.notes is string && data.notes.size() <= 240 &&
+      data.createdAt is timestamp &&
+      data.updatedAt is timestamp;
+    }
+
+    function isValidStaffMember(data, restaurantId) {
+      return data.keys().hasAll([
+        'restaurantId', 'restaurantOwnerId', 'userId', 'name', 'email',
+        'role', 'active', 'createdAt', 'updatedAt'
+      ]) &&
+      data.keys().hasOnly([
+        'restaurantId', 'restaurantOwnerId', 'userId', 'name', 'email',
+        'role', 'active', 'createdAt', 'updatedAt'
+      ]) &&
+      isValidId(data.restaurantId) &&
+      data.restaurantId == restaurantId &&
+      isValidId(data.restaurantOwnerId) &&
+      isValidId(data.userId) &&
+      data.name is string && data.name.size() >= 2 && data.name.size() <= 100 &&
+      data.email is string && data.email.size() >= 5 && data.email.size() <= 160 &&
+      data.role in ['owner', 'manager', 'chef', 'waiter'] &&
+      data.active is bool &&
+      data.createdAt is timestamp &&
+      data.updatedAt is timestamp;
+    }
+
+    // Connection probe document
+    match /test/connection {
+      allow get: if isSignedIn();
+    }
+
+    // Platform Super Admins collection (strictly admin-managed, never self-assigned)
+    match /admins/{userId} {
+      allow get: if isValidId(userId) && isVerifiedUser() && (request.auth.uid == userId || isAdmin());
+      allow list: if isBootstrappedAdmin();
+      allow create, update, delete: if isValidId(userId) && isAdmin();
+    }
+
+    // Multi-tenant Restaurants
+    match /restaurants/{restaurantId} {
+      allow get: if isValidId(restaurantId);
+      // Pillar 8: Zero-lookup resource.data list guard
+      allow list: if isBootstrappedAdmin() || (isVerifiedUser() && resource.data.ownerId == request.auth.uid);
+
+      allow create: if isVerifiedUser() &&
+        isValidId(restaurantId) &&
+        isValidRestaurant(incoming()) &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time &&
+        (isAdmin() || incoming().ownerId == request.auth.uid);
+
+      allow update: if isVerifiedUser() &&
+        isValidId(restaurantId) &&
+        isValidRestaurant(incoming()) &&
+        incoming().ownerId == existing().ownerId &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time && (
+          isAdmin() ||
+          (
+            existing().ownerId == request.auth.uid &&
+            incoming().diff(existing()).affectedKeys().hasOnly([
+              'name', 'city', 'cuisine', 'active', 'tableCount',
+              'wifiSsid', 'wifiPassword', 'wifiSecurity', 'currency', 'updatedAt'
+            ])
+          )
+        );
+
+      allow delete: if isValidId(restaurantId) && (isAdmin() || isRestaurantOwner(restaurantId));
+
+      // Subcollection: Real-time Digital Menu Items
+      match /menuItems/{itemId} {
+        allow get: if isValidId(restaurantId) && isValidId(itemId);
+        allow list: if resource.data.restaurantId == restaurantId;
+
+        allow create: if isVerifiedUser() &&
+          isValidId(restaurantId) &&
+          isValidId(itemId) &&
+          isValidMenuItem(incoming(), restaurantId) &&
+          incoming().updatedAt == request.time &&
+          restaurantExists(restaurantId) &&
+          isRestaurantManagerOrOwner(restaurantId);
+
+        allow update: if isVerifiedUser() &&
+          isValidId(restaurantId) &&
+          isValidId(itemId) &&
+          isValidMenuItem(incoming(), restaurantId) &&
+          incoming().restaurantId == existing().restaurantId &&
+          incoming().updatedAt == request.time &&
+          restaurantExists(restaurantId) && (
+            isAdmin() ||
+            (
+              isRestaurantManagerOrOwner(restaurantId) &&
+              incoming().diff(existing()).affectedKeys().hasOnly([
+                'name', 'description', 'category', 'price', 'available',
+                'veg', 'prepMinutes', 'imageUrl', 'popular', 'updatedAt'
+              ])
+            ) ||
+            (
+              isRestaurantStaff(restaurantId) &&
+              incoming().diff(existing()).affectedKeys().hasOnly(['available', 'updatedAt'])
+            )
+          );
+
+        allow delete: if isValidId(restaurantId) && isValidId(itemId) &&
+          restaurantExists(restaurantId) &&
+          isRestaurantManagerOrOwner(restaurantId);
+      }
+
+      // Subcollection: Live Kitchen & Dine-in Orders
+      match /orders/{orderId} {
+        allow get: if isVerifiedUser() &&
+          isValidId(restaurantId) &&
+          isValidId(orderId) && (
+            isAdmin() ||
+            isRestaurantOwner(restaurantId) ||
+            isRestaurantStaff(restaurantId) ||
+            resource.data.customerUid == request.auth.uid
+          );
+
+        // Pillar 8: Zero-lookup resource.data list guard
+        allow list: if isBootstrappedAdmin() || (
+          isVerifiedUser() && (
+            resource.data.customerUid == request.auth.uid ||
+            resource.data.restaurantOwnerId == request.auth.uid
+          )
+        );
+
+        allow create: if isVerifiedUser() &&
+          isValidId(restaurantId) &&
+          isValidId(orderId) &&
+          isValidOrder(incoming(), restaurantId) &&
+          incoming().customerUid == request.auth.uid &&
+          incoming().status == 'pending' &&
+          incoming().createdAt == request.time &&
+          incoming().updatedAt == request.time &&
+          restaurantExists(restaurantId) &&
+          incoming().restaurantOwnerId == restaurantDoc(restaurantId).data.ownerId;
+
+        allow update: if isVerifiedUser() &&
+          isValidId(restaurantId) &&
+          isValidId(orderId) &&
+          isValidOrder(incoming(), restaurantId) &&
+          incoming().restaurantId == existing().restaurantId &&
+          incoming().restaurantOwnerId == existing().restaurantOwnerId &&
+          incoming().customerUid == existing().customerUid &&
+          incoming().createdAt == existing().createdAt &&
+          incoming().updatedAt == request.time &&
+          restaurantExists(restaurantId) && (
+            isAdmin() ||
+            (
+              !(existing().status in ['served', 'cancelled']) &&
+              (isRestaurantOwner(restaurantId) || isRestaurantStaff(restaurantId)) &&
+              incoming().diff(existing()).affectedKeys().hasOnly(['status', 'updatedAt'])
+            )
+          );
+
+        allow delete: if isValidId(restaurantId) && isValidId(orderId) && isAdmin();
+      }
+
+      // Subcollection: Staff Roster (PII strictly isolated)
+      match /staff/{staffId} {
+        allow get: if isVerifiedUser() &&
+          isValidId(restaurantId) &&
+          isValidId(staffId) && (
+            isAdmin() ||
+            isRestaurantOwner(restaurantId) ||
+            resource.data.userId == request.auth.uid
+          );
+
+        // Pillar 8: Zero-lookup resource.data list guard
+        allow list: if isBootstrappedAdmin() || (
+          isVerifiedUser() && (
+            resource.data.restaurantOwnerId == request.auth.uid ||
+            resource.data.userId == request.auth.uid
+          )
+        );
+
+        allow create: if isVerifiedUser() &&
+          isValidId(restaurantId) &&
+          isValidId(staffId) &&
+          isValidStaffMember(incoming(), restaurantId) &&
+          incoming().createdAt == request.time &&
+          incoming().updatedAt == request.time &&
+          restaurantExists(restaurantId) &&
+          incoming().restaurantOwnerId == restaurantDoc(restaurantId).data.ownerId &&
+          isRestaurantManagerOrOwner(restaurantId);
+
+        allow update: if isVerifiedUser() &&
+          isValidId(restaurantId) &&
+          isValidId(staffId) &&
+          isValidStaffMember(incoming(), restaurantId) &&
+          incoming().restaurantId == existing().restaurantId &&
+          incoming().restaurantOwnerId == existing().restaurantOwnerId &&
+          incoming().userId == existing().userId &&
+          incoming().createdAt == existing().createdAt &&
+          incoming().updatedAt == request.time &&
+          restaurantExists(restaurantId) && (
+            isAdmin() ||
+            (
+              isRestaurantManagerOrOwner(restaurantId) &&
+              incoming().diff(existing()).affectedKeys().hasOnly(['name', 'role', 'active', 'updatedAt'])
+            )
+          );
+
+        allow delete: if isValidId(restaurantId) && isValidId(staffId) &&
+          restaurantExists(restaurantId) &&
+          isRestaurantManagerOrOwner(restaurantId);
+      }
+    }
+  }
+}
