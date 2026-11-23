@@ -1,6 +1,6 @@
 import express from 'express';
 import { GoogleGenAI, Type } from '@google/genai';
-import type { AuthManager } from './serverAuth';
+import type { AuthManager } from './serverAuth.js';
 
 export function getGeminiClient(): GoogleGenAI {
   const apiKey = process.env.GEMINI_API_KEY;

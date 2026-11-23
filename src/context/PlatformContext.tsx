@@ -501,6 +501,16 @@ export function PlatformProvider({ children }: { children: React.ReactNode }) {
     [fetchRestaurantAccounts]
   );
 
+  const parseJsonResponse = async <T,>(res: Response): Promise<T | null> => {
+    const text = await res.text();
+    if (!text) return null;
+    try {
+      return JSON.parse(text) as T;
+    } catch {
+      return null;
+    }
+  };
+
   const setupAppOwner = useCallback(
     async (email: string, password: string): Promise<{ ok: boolean; error?: string }> => {
       try {
@@ -509,13 +519,18 @@ export function PlatformProvider({ children }: { children: React.ReactNode }) {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ email, password }),
         });
-        const data = (await res.json()) as {
+        const data = await parseJsonResponse<{
           token?: string;
           session?: PortalSession;
           error?: string;
-        };
-        if (!res.ok || !data.token || !data.session) {
-          return { ok: false, error: data.error || 'Could not activate App Owner account.' };
+        }>(res);
+        if (!res.ok || !data?.token || !data?.session) {
+          return {
+            ok: false,
+            error:
+              data?.error ||
+              `Authentication API error (HTTP ${res.status}). Check server / Vercel API deployment.`,
+          };
         }
         setPortalAuthStatus((prev) =>
           prev ? { ...prev, adminConfigured: true } : prev
@@ -537,13 +552,20 @@ export function PlatformProvider({ children }: { children: React.ReactNode }) {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ username, password }),
         });
-        const data = (await res.json()) as {
+        const data = await parseJsonResponse<{
           token?: string;
           session?: PortalSession;
           error?: string;
-        };
-        if (!res.ok || !data.token || !data.session) {
-          return { ok: false, error: data.error || 'Invalid username or password.' };
+        }>(res);
+        if (!res.ok || !data?.token || !data?.session) {
+          return {
+            ok: false,
+            error:
+              data?.error ||
+              (res.status === 401
+                ? 'Invalid username or password.'
+                : `Authentication API error (HTTP ${res.status}). Ensure /api is deployed and APP_OWNER_PASSWORD is set.`),
+          };
         }
         applyAuthenticatedSession(data.token, data.session);
         return { ok: true };
@@ -571,9 +593,12 @@ export function PlatformProvider({ children }: { children: React.ReactNode }) {
           },
           body: JSON.stringify({ currentPassword, newPassword }),
         });
-        const data = (await res.json()) as { ok?: boolean; error?: string };
-        if (!res.ok || !data.ok) {
-          return { ok: false, error: data.error || 'Could not update password.' };
+        const data = await parseJsonResponse<{ ok?: boolean; error?: string }>(res);
+        if (!res.ok || !data?.ok) {
+          return {
+            ok: false,
+            error: data?.error || `Could not update password (HTTP ${res.status}).`,
+          };
         }
         try {
           channelRef.current?.postMessage({ type: 'ACCOUNTS_UPDATED' });

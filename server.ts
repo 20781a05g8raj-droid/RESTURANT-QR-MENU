@@ -11,8 +11,8 @@ import {
   Modality,
   Type,
 } from '@google/genai';
-import { AuthManager } from './serverAuth';
-import { createApiRouter, getGeminiClient } from './serverApi';
+import { AuthManager } from './serverAuth.js';
+import { createApiRouter, getGeminiClient } from './serverApi.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
