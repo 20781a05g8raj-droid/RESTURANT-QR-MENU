@@ -189,3 +189,132 @@ test('per-restaurant owner credentials isolate login to that restaurantId and su
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('session tokens survive serverless cold starts and local restarts without losing login', () => {
+  const dir = createTempDir();
+  try {
+    // Simulated Vercel serverless cold start with APP_OWNER_PASSWORD configured
+    const lambda1 = new AuthManager({
+      baseDir: dir,
+      env: { APP_OWNER_EMAIL: 'rajensu264@gmail.com', APP_OWNER_PASSWORD: 'FixedOwnerPassword#7' },
+    });
+    const login1 = lambda1.login('rajensu264@gmail.com', 'FixedOwnerPassword#7');
+    assert.equal(login1.ok, true);
+
+    const lambda2 = new AuthManager({
+      baseDir: dir,
+      env: { APP_OWNER_EMAIL: 'rajensu264@gmail.com', APP_OWNER_PASSWORD: 'FixedOwnerPassword#7' },
+    });
+    if (login1.ok) {
+      const verified = lambda2.verifySessionToken(login1.token);
+      assert.equal(verified?.role, 'super_admin');
+      assert.equal(verified?.username, 'rajensu264@gmail.com');
+
+      const refreshed = lambda2.issueTokenForSession(verified!);
+      assert.equal(lambda1.verifySessionToken(refreshed)?.username, 'rajensu264@gmail.com');
+    }
+
+    // Local first-run claim also keeps signing key deterministic across restarts
+    const localDir = createTempDir();
+    try {
+      const boot1 = new AuthManager({
+        baseDir: localDir,
+        env: { APP_OWNER_EMAIL: 'rajensu264@gmail.com', APP_OWNER_PASSWORD: '' },
+      });
+      const claim = boot1.claimFirstRunAdmin('rajensu264@gmail.com', 'LocalClaim#1');
+      assert.equal(claim.ok, true);
+
+      const boot2 = new AuthManager({
+        baseDir: localDir,
+        env: { APP_OWNER_EMAIL: 'rajensu264@gmail.com', APP_OWNER_PASSWORD: '' },
+      });
+      if (claim.ok) {
+        assert.equal(boot2.verifySessionToken(claim.token)?.role, 'super_admin');
+      }
+    } finally {
+      fs.rmSync(localDir, { recursive: true, force: true });
+    }
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('HTTP auth routes set HttpOnly session cookie, restore on /auth/me, enforce CSRF, and clear on /auth/logout', async () => {
+  const [{ default: express }, { default: http }, { createApiRouter, SESSION_COOKIE_NAME }] =
+    await Promise.all([import('express'), import('node:http'), import('./serverApi')]);
+
+  const dir = createTempDir();
+  const auth = new AuthManager({
+    baseDir: dir,
+    env: { APP_OWNER_EMAIL: 'rajensu264@gmail.com', APP_OWNER_PASSWORD: 'CookiePass#2026' },
+  });
+
+  const app = express();
+  app.set('trust proxy', 1);
+  app.use(express.json());
+  app.use('/api', createApiRouter(auth));
+
+  const server = http.createServer(app);
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const address = server.address();
+  assert(address && typeof address === 'object');
+  const baseUrl = `http://127.0.0.1:${address.port}`;
+
+  try {
+    // 1. Login issues HttpOnly cookie (with Secure; SameSite=None; Partitioned on HTTPS proxy)
+    const httpsLogin = await fetch(`${baseUrl}/api/auth/login`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Forwarded-Proto': 'https',
+        'X-Requested-With': 'TablePulse',
+      },
+      body: JSON.stringify({ username: 'rajensu264@gmail.com', password: 'CookiePass#2026' }),
+    });
+    assert.equal(httpsLogin.status, 200);
+    const setCookieHeader = httpsLogin.headers.get('set-cookie') ?? '';
+    assert.match(setCookieHeader, new RegExp(`^${SESSION_COOKIE_NAME}=`));
+    assert.match(setCookieHeader, /HttpOnly/i);
+    assert.match(setCookieHeader, /Secure/i);
+    assert.match(setCookieHeader, /SameSite=None/i);
+    assert.match(setCookieHeader, /Partitioned/i);
+
+    const cookiePair = setCookieHeader.split(';')[0];
+
+    // 2. GET /api/auth/me restores session from HttpOnly cookie (without Bearer header)
+    const meRes = await fetch(`${baseUrl}/api/auth/me`, {
+      headers: { Cookie: cookiePair },
+    });
+    assert.equal(meRes.status, 200);
+    const meJson = (await meRes.json()) as {
+      session?: { role: string; username: string };
+      token?: string;
+    };
+    assert.equal(meJson.session?.role, 'super_admin');
+    assert.equal(meJson.session?.username, 'rajensu264@gmail.com');
+    assert.ok(meJson.token && meJson.token.length > 20);
+
+    // 3. Cookie-authenticated mutation rejects cross-site request missing X-Requested-With / matching Origin
+    const csrfBlocked = await fetch(`${baseUrl}/api/auth/logout`, {
+      method: 'POST',
+      headers: { Cookie: cookiePair, Origin: 'https://evil.example' },
+    });
+    assert.equal(csrfBlocked.status, 403);
+
+    // 4. Logout with X-Requested-With clears the HttpOnly cookie
+    const logoutRes = await fetch(`${baseUrl}/api/auth/logout`, {
+      method: 'POST',
+      headers: {
+        Cookie: cookiePair,
+        'X-Requested-With': 'TablePulse',
+      },
+    });
+    assert.equal(logoutRes.status, 200);
+    const clearCookieHeader = logoutRes.headers.get('set-cookie') ?? '';
+    assert.match(clearCookieHeader, /Max-Age=0/i);
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+

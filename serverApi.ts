@@ -1,6 +1,103 @@
 import express from 'express';
 import { GoogleGenAI, Type } from '@google/genai';
-import type { AuthManager } from './serverAuth.js';
+import {
+  SESSION_COOKIE_MAX_AGE_SECONDS,
+  type AuthManager,
+  type PortalSessionPayload,
+} from './serverAuth.js';
+
+export const SESSION_COOKIE_NAME = 'tp_portal_session';
+
+export function parseCookies(cookieHeader?: string): Record<string, string> {
+  const result: Record<string, string> = {};
+  if (!cookieHeader) return result;
+  for (const part of cookieHeader.split(';')) {
+    const idx = part.indexOf('=');
+    if (idx <= 0) continue;
+    const key = part.slice(0, idx).trim();
+    const rawVal = part.slice(idx + 1).trim();
+    if (!key) continue;
+    try {
+      result[key] = decodeURIComponent(rawVal);
+    } catch {
+      result[key] = rawVal;
+    }
+  }
+  return result;
+}
+
+function isHttpsRequest(req: express.Request): boolean {
+  const protoHeader = String(req.headers['x-forwarded-proto'] ?? '')
+    .split(',')[0]
+    .trim()
+    .toLowerCase();
+  return Boolean(req.secure || protoHeader === 'https' || process.env.VERCEL === '1');
+}
+
+function buildSessionCookieHeader(req: express.Request, value: string, maxAgeSeconds: number): string {
+  const attrs = [
+    `${SESSION_COOKIE_NAME}=${encodeURIComponent(value)}`,
+    'Path=/',
+    `Max-Age=${maxAgeSeconds}`,
+    'HttpOnly',
+  ];
+  if (maxAgeSeconds === 0) {
+    attrs.push('Expires=Thu, 01 Jan 1970 00:00:00 GMT');
+  }
+  if (isHttpsRequest(req)) {
+    attrs.push('Secure', 'SameSite=None', 'Partitioned');
+  } else {
+    attrs.push('SameSite=Lax');
+  }
+  return attrs.join('; ');
+}
+
+function setSessionCookie(req: express.Request, res: express.Response, token: string): void {
+  res.setHeader(
+    'Set-Cookie',
+    buildSessionCookieHeader(req, token, SESSION_COOKIE_MAX_AGE_SECONDS)
+  );
+}
+
+function clearSessionCookie(req: express.Request, res: express.Response): void {
+  res.setHeader('Set-Cookie', buildSessionCookieHeader(req, '', 0));
+}
+
+function verifyCsrfForCookieMutation(req: express.Request): boolean {
+  const requestedWith = String(req.headers['x-requested-with'] ?? '').trim();
+  if (requestedWith === 'TablePulse') return true;
+
+  const originHeader = String(req.headers.origin ?? '').trim();
+  const hostHeader = String(req.headers['x-forwarded-host'] ?? req.headers.host ?? '')
+    .split(',')[0]
+    .trim()
+    .toLowerCase();
+  if (originHeader && hostHeader) {
+    try {
+      const originHost = new URL(originHeader).host.toLowerCase();
+      if (originHost === hostHeader) return true;
+    } catch {
+      return false;
+    }
+  }
+  return false;
+}
+
+function authenticateRequest(
+  req: express.Request,
+  authManager: AuthManager
+): { session: PortalSessionPayload; viaCookie: boolean } | null {
+  const bearerSession = authManager.verifyAuthHeader(req.headers.authorization);
+  if (bearerSession) {
+    return { session: bearerSession, viaCookie: false };
+  }
+  const cookies = parseCookies(req.headers.cookie);
+  const cookieToken = cookies[SESSION_COOKIE_NAME];
+  if (!cookieToken) return null;
+  const cookieSession = authManager.verifySessionToken(cookieToken);
+  if (!cookieSession) return null;
+  return { session: cookieSession, viaCookie: true };
+}
 
 export function getGeminiClient(): GoogleGenAI {
   const apiKey = process.env.GEMINI_API_KEY;
@@ -39,43 +136,71 @@ export function createApiRouter(authManager: AuthManager): express.Router {
   });
 
   // ---- Portal Authentication & Per-Restaurant Credentials ----
-  router.get('/auth/status', (_req, res) => {
-    res.json(authManager.getStatus());
+  router.get('/auth/status', (req, res) => {
+    res.setHeader('Cache-Control', 'no-store');
+    const authResult = authenticateRequest(req, authManager);
+    res.json({
+      ...authManager.getStatus(),
+      hasSession: Boolean(authResult),
+    });
   });
 
   router.post('/auth/setup-admin', (req, res) => {
+    res.setHeader('Cache-Control', 'no-store');
     const { email, password } = (req.body ?? {}) as { email?: string; password?: string };
     const result = authManager.claimFirstRunAdmin(String(email ?? ''), String(password ?? ''));
     if (!result.ok) {
       res.status(result.status).json({ error: result.error });
       return;
     }
+    setSessionCookie(req, res, result.token);
     res.json({ token: result.token, session: result.session });
   });
 
   router.post('/auth/login', (req, res) => {
+    res.setHeader('Cache-Control', 'no-store');
     const { username, password } = (req.body ?? {}) as { username?: string; password?: string };
     const result = authManager.login(String(username ?? ''), String(password ?? ''));
     if (!result.ok) {
       res.status(result.status).json({ error: result.error });
       return;
     }
+    setSessionCookie(req, res, result.token);
     res.json({ token: result.token, session: result.session });
   });
 
   router.get('/auth/me', (req, res) => {
-    const session = authManager.verifyAuthHeader(req.headers.authorization);
-    if (!session) {
+    res.setHeader('Cache-Control', 'no-store');
+    const authResult = authenticateRequest(req, authManager);
+    if (!authResult) {
       res.status(401).json({ error: 'Not authenticated.' });
       return;
     }
-    res.json({ session });
+    const freshToken = authManager.issueTokenForSession(authResult.session);
+    setSessionCookie(req, res, freshToken);
+    res.json({ session: authResult.session, token: freshToken });
+  });
+
+  router.post('/auth/logout', (req, res) => {
+    res.setHeader('Cache-Control', 'no-store');
+    const cookies = parseCookies(req.headers.cookie);
+    if (cookies[SESSION_COOKIE_NAME] && !verifyCsrfForCookieMutation(req)) {
+      res.status(403).json({ error: 'Invalid request origin.' });
+      return;
+    }
+    clearSessionCookie(req, res);
+    res.json({ ok: true });
   });
 
   router.post('/auth/change-password', (req, res) => {
-    const session = authManager.verifyAuthHeader(req.headers.authorization);
-    if (!session) {
+    res.setHeader('Cache-Control', 'no-store');
+    const authResult = authenticateRequest(req, authManager);
+    if (!authResult) {
       res.status(401).json({ error: 'Not authenticated.' });
+      return;
+    }
+    if (authResult.viaCookie && !verifyCsrfForCookieMutation(req)) {
+      res.status(403).json({ error: 'Invalid request origin.' });
       return;
     }
     const { currentPassword, newPassword } = (req.body ?? {}) as {
@@ -83,7 +208,7 @@ export function createApiRouter(authManager: AuthManager): express.Router {
       newPassword?: string;
     };
     const result = authManager.changeOwnPassword(
-      session,
+      authResult.session,
       String(currentPassword ?? ''),
       String(newPassword ?? '')
     );
@@ -95,8 +220,9 @@ export function createApiRouter(authManager: AuthManager): express.Router {
   });
 
   router.get('/auth/restaurant-accounts', (req, res) => {
-    const session = authManager.verifyAuthHeader(req.headers.authorization);
-    if (!session || session.role !== 'super_admin') {
+    res.setHeader('Cache-Control', 'no-store');
+    const authResult = authenticateRequest(req, authManager);
+    if (!authResult || authResult.session.role !== 'super_admin') {
       res.status(403).json({ error: 'App Owner access required.' });
       return;
     }
@@ -104,9 +230,14 @@ export function createApiRouter(authManager: AuthManager): express.Router {
   });
 
   router.post('/auth/restaurant-accounts', (req, res) => {
-    const session = authManager.verifyAuthHeader(req.headers.authorization);
-    if (!session || session.role !== 'super_admin') {
+    res.setHeader('Cache-Control', 'no-store');
+    const authResult = authenticateRequest(req, authManager);
+    if (!authResult || authResult.session.role !== 'super_admin') {
       res.status(403).json({ error: 'App Owner access required.' });
+      return;
+    }
+    if (authResult.viaCookie && !verifyCsrfForCookieMutation(req)) {
+      res.status(403).json({ error: 'Invalid request origin.' });
       return;
     }
     const { restaurantId, username, password } = (req.body ?? {}) as {
@@ -127,9 +258,14 @@ export function createApiRouter(authManager: AuthManager): express.Router {
   });
 
   router.delete('/auth/restaurant-accounts/:restaurantId', (req, res) => {
-    const session = authManager.verifyAuthHeader(req.headers.authorization);
-    if (!session || session.role !== 'super_admin') {
+    res.setHeader('Cache-Control', 'no-store');
+    const authResult = authenticateRequest(req, authManager);
+    if (!authResult || authResult.session.role !== 'super_admin') {
       res.status(403).json({ error: 'App Owner access required.' });
+      return;
+    }
+    if (authResult.viaCookie && !verifyCsrfForCookieMutation(req)) {
+      res.status(403).json({ error: 'Invalid request origin.' });
       return;
     }
     authManager.deleteRestaurantAccount(req.params.restaurantId);

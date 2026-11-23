@@ -448,43 +448,14 @@ export function PlatformProvider({ children }: { children: React.ReactNode }) {
     }
   }, []);
 
-  // Load server portal auth status on mount (never exposes owner email publicly)
-  useEffect(() => {
-    let active = true;
-    fetch('/api/auth/status')
-      .then((res) => {
-        if (!res.ok) throw new Error('Auth status unavailable');
-        return res.json();
-      })
-      .then((data: PortalAuthStatus) => {
-        if (active) {
-          setPortalAuthStatus({
-            adminConfigured: Boolean(data.adminConfigured),
-            usesEnvPassword: Boolean(data.usesEnvPassword),
-          });
-        }
-      })
-      .catch(() => {
-        // Default to standard Sign In screen if auth status endpoint is temporarily unreachable
-        if (active) {
-          setPortalAuthStatus({
-            adminConfigured: true,
-            usesEnvPassword: false,
-          });
-        }
-      })
-      .finally(() => {
-        if (active) setPortalAuthLoading(false);
-      });
-    return () => {
-      active = false;
-    };
-  }, []);
-
   const fetchRestaurantAccounts = useCallback(async (token: string) => {
     try {
       const res = await fetch('/api/auth/restaurant-accounts', {
-        headers: { Authorization: `Bearer ${token}` },
+        credentials: 'same-origin',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'X-Requested-With': 'TablePulse',
+        },
       });
       if (!res.ok) return;
       const data = (await res.json()) as {
@@ -508,20 +479,6 @@ export function PlatformProvider({ children }: { children: React.ReactNode }) {
     }
   }, []);
 
-  // Refresh App Owner's synced restaurant credentials when another tab updates a password
-  useEffect(() => {
-    if (!channelRef.current || portalSession?.role !== 'super_admin' || !authToken) return;
-    const channel = channelRef.current;
-    const handleSync = (event: MessageEvent) => {
-      if (event.data?.type === 'SYNC_STATE' && event.data?.payload) {
-        setState(event.data.payload as PersistedState);
-      } else if (event.data?.type === 'ACCOUNTS_UPDATED') {
-        void fetchRestaurantAccounts(authToken);
-      }
-    };
-    channel.onmessage = handleSync;
-  }, [authToken, fetchRestaurantAccounts, portalSession?.role]);
-
   const applyAuthenticatedSession = useCallback(
     (token: string, session: PortalSession) => {
       setAuthToken(token);
@@ -540,6 +497,95 @@ export function PlatformProvider({ children }: { children: React.ReactNode }) {
     [fetchRestaurantAccounts]
   );
 
+  // Load server portal auth status & restore persistent HttpOnly session cookie on mount
+  useEffect(() => {
+    let active = true;
+    const isScannedQrMenu = Boolean(new URLSearchParams(window.location.search).get('menu'));
+
+    const hydratePortalAuth = async () => {
+      try {
+        const statusRes = await fetch('/api/auth/status', {
+          credentials: 'same-origin',
+          cache: 'no-store',
+        });
+        if (!statusRes.ok) throw new Error('Auth status unavailable');
+        const statusData = (await statusRes.json()) as PortalAuthStatus & { hasSession?: boolean };
+        if (!active) return;
+
+        setPortalAuthStatus({
+          adminConfigured: Boolean(statusData.adminConfigured),
+          usesEnvPassword: Boolean(statusData.usesEnvPassword),
+        });
+
+        if (statusData.hasSession) {
+          const meRes = await fetch('/api/auth/me', {
+            credentials: 'same-origin',
+            cache: 'no-store',
+            headers: { 'X-Requested-With': 'TablePulse' },
+          });
+          if (meRes.ok && active) {
+            const meData = (await meRes.json()) as {
+              session?: PortalSession;
+              token?: string;
+            };
+            if (meData.session && meData.token) {
+              if (isScannedQrMenu) {
+                setAuthToken(meData.token);
+                setPortalSession(meData.session);
+                if (meData.session.role === 'super_admin') {
+                  void fetchRestaurantAccounts(meData.token);
+                }
+              } else {
+                applyAuthenticatedSession(meData.token, meData.session);
+              }
+            }
+          }
+        }
+      } catch {
+        if (active) {
+          setPortalAuthStatus({
+            adminConfigured: true,
+            usesEnvPassword: false,
+          });
+        }
+      } finally {
+        if (active) setPortalAuthLoading(false);
+      }
+    };
+
+    void hydratePortalAuth();
+
+    return () => {
+      active = false;
+    };
+  }, [applyAuthenticatedSession, fetchRestaurantAccounts]);
+
+  // Refresh App Owner's synced restaurant credentials & sync sign-out across browser tabs
+  useEffect(() => {
+    if (!channelRef.current) return;
+    const channel = channelRef.current;
+    const handleSync = (event: MessageEvent) => {
+      if (event.data?.type === 'SYNC_STATE' && event.data?.payload) {
+        setState(event.data.payload as PersistedState);
+      } else if (
+        event.data?.type === 'ACCOUNTS_UPDATED' &&
+        portalSession?.role === 'super_admin' &&
+        authToken
+      ) {
+        void fetchRestaurantAccounts(authToken);
+      } else if (event.data?.type === 'PORTAL_LOGOUT') {
+        setAuthToken(null);
+        setPortalSession(null);
+        setRestaurantAccountUsernames({});
+        setRestaurantAccountMeta({});
+        setChangePasswordModalOpen(false);
+        setAddRestaurantModalOpen(false);
+        setEditingRestaurant(null);
+      }
+    };
+    channel.onmessage = handleSync;
+  }, [authToken, fetchRestaurantAccounts, portalSession?.role]);
+
   const parseJsonResponse = async <T,>(res: Response): Promise<T | null> => {
     const text = await res.text();
     if (!text) return null;
@@ -555,7 +601,11 @@ export function PlatformProvider({ children }: { children: React.ReactNode }) {
       try {
         const res = await fetch('/api/auth/setup-admin', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          credentials: 'same-origin',
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Requested-With': 'TablePulse',
+          },
           body: JSON.stringify({ email, password }),
         });
         const data = await parseJsonResponse<{
@@ -588,7 +638,11 @@ export function PlatformProvider({ children }: { children: React.ReactNode }) {
       try {
         const res = await fetch('/api/auth/login', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          credentials: 'same-origin',
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Requested-With': 'TablePulse',
+          },
           body: JSON.stringify({ username, password }),
         });
         const data = await parseJsonResponse<{
@@ -626,9 +680,11 @@ export function PlatformProvider({ children }: { children: React.ReactNode }) {
       try {
         const res = await fetch('/api/auth/change-password', {
           method: 'POST',
+          credentials: 'same-origin',
           headers: {
             'Content-Type': 'application/json',
             Authorization: `Bearer ${authToken}`,
+            'X-Requested-With': 'TablePulse',
           },
           body: JSON.stringify({ currentPassword, newPassword }),
         });
@@ -661,6 +717,18 @@ export function PlatformProvider({ children }: { children: React.ReactNode }) {
     setAddRestaurantModalOpen(false);
     setEditingRestaurant(null);
     setGuestPreviewMode(false);
+    void fetch('/api/auth/logout', {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'X-Requested-With': 'TablePulse' },
+    }).catch(() => {
+      // ignore network error on sign-out cleanup
+    });
+    try {
+      channelRef.current?.postMessage({ type: 'PORTAL_LOGOUT' });
+    } catch {
+      // ignore broadcast errors
+    }
   }, []);
 
   // Firebase Auth + Connection Validation + Redirect completion
@@ -1118,9 +1186,11 @@ export function PlatformProvider({ children }: { children: React.ReactNode }) {
         }
         const credRes = await fetch('/api/auth/restaurant-accounts', {
           method: 'POST',
+          credentials: 'same-origin',
           headers: {
             'Content-Type': 'application/json',
             Authorization: `Bearer ${authToken}`,
+            'X-Requested-With': 'TablePulse',
           },
           body: JSON.stringify({
             restaurantId: id,
@@ -1244,9 +1314,11 @@ export function PlatformProvider({ children }: { children: React.ReactNode }) {
       if (portalSession?.role === 'super_admin' && authToken && (cleanOwnerUser || cleanOwnerPass)) {
         const credRes = await fetch('/api/auth/restaurant-accounts', {
           method: 'POST',
+          credentials: 'same-origin',
           headers: {
             'Content-Type': 'application/json',
             Authorization: `Bearer ${authToken}`,
+            'X-Requested-With': 'TablePulse',
           },
           body: JSON.stringify({
             restaurantId,
@@ -1342,7 +1414,11 @@ export function PlatformProvider({ children }: { children: React.ReactNode }) {
       if (authToken) {
         await fetch(`/api/auth/restaurant-accounts/${encodeURIComponent(restaurantId)}`, {
           method: 'DELETE',
-          headers: { Authorization: `Bearer ${authToken}` },
+          credentials: 'same-origin',
+          headers: {
+            Authorization: `Bearer ${authToken}`,
+            'X-Requested-With': 'TablePulse',
+          },
         }).catch(() => {
           // ignore if account did not exist
         });

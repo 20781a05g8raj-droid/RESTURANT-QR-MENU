@@ -39,7 +39,8 @@ interface AuthStoreData {
 }
 
 const DEFAULT_APP_OWNER_EMAIL = 'rajensu264@gmail.com';
-const TOKEN_TTL_MS = 24 * 60 * 60 * 1000;
+export const SESSION_COOKIE_MAX_AGE_SECONDS = 30 * 24 * 60 * 60; // 30 days
+const TOKEN_TTL_MS = SESSION_COOKIE_MAX_AGE_SECONDS * 1000;
 const VALID_RESTAURANT_ID = /^[a-zA-Z0-9_-]{2,80}$/;
 
 export function hashPassword(password: string): { salt: string; hash: string } {
@@ -118,7 +119,7 @@ export class AuthManager {
   private readonly baseDir: string;
   private readonly storePath: string;
   private readonly env: Record<string, string | undefined>;
-  private readonly signingSecret: string;
+  private readonly fallbackSecret: string;
   private store: AuthStoreData;
 
   constructor(options: AuthManagerOptions) {
@@ -134,11 +135,32 @@ export class AuthManager {
       throw new Error('Auth store path escapes base directory.');
     }
     this.storePath = resolved;
-    this.signingSecret =
-      (this.env.SESSION_SECRET && this.env.SESSION_SECRET.trim().length >= 16
-        ? this.env.SESSION_SECRET.trim()
-        : null) ?? crypto.randomBytes(32).toString('hex');
+    this.fallbackSecret = crypto.randomBytes(32).toString('hex');
     this.store = this.loadStore();
+  }
+
+  private getSigningSecret(): string {
+    const envSecret = this.cleanEnvValue(this.env.SESSION_SECRET);
+    if (envSecret.length >= 16) return envSecret;
+
+    const envPassword = this.getEnvAdminPassword();
+    if (envPassword.length > 0) {
+      return crypto
+        .createHmac('sha256', 'tablepulse-session-signing-v1')
+        .update(`${this.getAppOwnerEmail()}:${envPassword}`)
+        .digest('hex');
+    }
+
+    if (this.store.adminAccount) {
+      return crypto
+        .createHmac('sha256', 'tablepulse-local-session-v1')
+        .update(
+          `${this.store.adminAccount.email}:${this.store.adminAccount.salt}:${this.store.adminAccount.hash}`
+        )
+        .digest('hex');
+    }
+
+    return this.fallbackSecret;
   }
 
   private cleanEnvValue(raw?: string): string {
@@ -247,7 +269,7 @@ export class AuthManager {
     };
     return {
       ok: true,
-      token: signToken(session, this.signingSecret),
+      token: signToken(session, this.getSigningSecret()),
       session,
     };
   }
@@ -283,7 +305,7 @@ export class AuthManager {
             username: appOwnerEmail,
             restaurantId: null,
           };
-          return { ok: true, token: signToken(session, this.signingSecret), session };
+          return { ok: true, token: signToken(session, this.getSigningSecret()), session };
         }
         return { ok: false, status: 401, error: 'Invalid username or password.' };
       }
@@ -297,7 +319,7 @@ export class AuthManager {
           username: appOwnerEmail,
           restaurantId: null,
         };
-        return { ok: true, token: signToken(session, this.signingSecret), session };
+        return { ok: true, token: signToken(session, this.getSigningSecret()), session };
       }
       return { ok: false, status: 401, error: 'Invalid username or password.' };
     }
@@ -314,17 +336,26 @@ export class AuthManager {
         username: matchedAccount.username,
         restaurantId: matchedAccount.restaurantId,
       };
-      return { ok: true, token: signToken(session, this.signingSecret), session };
+      return { ok: true, token: signToken(session, this.getSigningSecret()), session };
     }
 
     return { ok: false, status: 401, error: 'Invalid username or password.' };
   }
 
+  verifySessionToken(token?: string): PortalSessionPayload | null {
+    const clean = (token || '').trim();
+    if (!clean) return null;
+    return verifyToken(clean, this.getSigningSecret());
+  }
+
+  issueTokenForSession(session: PortalSessionPayload): string {
+    return signToken(session, this.getSigningSecret());
+  }
+
   verifyAuthHeader(authHeader?: string): PortalSessionPayload | null {
     if (!authHeader || !authHeader.startsWith('Bearer ')) return null;
     const token = authHeader.slice('Bearer '.length).trim();
-    if (!token) return null;
-    return verifyToken(token, this.signingSecret);
+    return this.verifySessionToken(token);
   }
 
   listRestaurantAccounts(): Record<string, RestaurantAccountSummary> {
