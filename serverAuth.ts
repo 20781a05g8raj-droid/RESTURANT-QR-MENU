@@ -1,11 +1,20 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 
 export interface PortalSessionPayload {
   role: 'super_admin' | 'owner';
   username: string;
   restaurantId: string | null;
+}
+
+export type PasswordUpdatedBy = 'app_owner' | 'restaurant_owner';
+
+export interface RestaurantAccountSummary {
+  username: string;
+  updatedAt: string;
+  passwordUpdatedBy: PasswordUpdatedBy;
 }
 
 interface StoredAdminAccount {
@@ -21,6 +30,7 @@ interface StoredRestaurantAccount {
   salt: string;
   hash: string;
   updatedAt: string;
+  passwordUpdatedBy?: PasswordUpdatedBy;
 }
 
 interface AuthStoreData {
@@ -112,14 +122,18 @@ export class AuthManager {
   private store: AuthStoreData;
 
   constructor(options: AuthManagerOptions) {
-    this.baseDir = path.resolve(options.baseDir);
+    this.env = options.env ?? process.env;
+    const effectiveBase =
+      this.env.VERCEL === '1'
+        ? path.join(os.tmpdir(), 'tablepulse-data')
+        : options.baseDir;
+    this.baseDir = path.resolve(effectiveBase);
     const fileName = options.storeFileName ?? 'auth-store.json';
     const resolved = path.resolve(this.baseDir, fileName);
     if (!resolved.startsWith(this.baseDir + path.sep)) {
       throw new Error('Auth store path escapes base directory.');
     }
     this.storePath = resolved;
-    this.env = options.env ?? process.env;
     this.signingSecret =
       (this.env.SESSION_SECRET && this.env.SESSION_SECRET.trim().length >= 16
         ? this.env.SESSION_SECRET.trim()
@@ -152,15 +166,21 @@ export class AuthManager {
   }
 
   private saveStore(): void {
-    fs.mkdirSync(this.baseDir, { recursive: true });
-    fs.writeFileSync(this.storePath, JSON.stringify(this.store, null, 2), { mode: 0o600 });
+    try {
+      fs.mkdirSync(this.baseDir, { recursive: true });
+      fs.writeFileSync(this.storePath, JSON.stringify(this.store, null, 2), { mode: 0o600 });
+    } catch {
+      // On read-only serverless runtimes, keep in-memory state intact without crashing
+    }
   }
 
+  /**
+   * Public auth status never discloses the App Owner's email address.
+   */
   getStatus() {
     const usesEnvPassword = this.getEnvAdminPassword().length > 0;
     const adminConfigured = usesEnvPassword || Boolean(this.store.adminAccount);
     return {
-      appOwnerEmail: this.getAppOwnerEmail(),
       adminConfigured,
       usesEnvPassword,
     };
@@ -186,7 +206,7 @@ export class AuthManager {
       return {
         ok: false,
         status: 400,
-        error: `App Owner email must match ${expectedEmail}.`,
+        error: 'Invalid App Owner email address.',
       };
     }
 
@@ -286,12 +306,13 @@ export class AuthManager {
     return verifyToken(token, this.signingSecret);
   }
 
-  listRestaurantAccounts(): Record<string, { username: string; updatedAt: string }> {
-    const output: Record<string, { username: string; updatedAt: string }> = {};
+  listRestaurantAccounts(): Record<string, RestaurantAccountSummary> {
+    const output: Record<string, RestaurantAccountSummary> = {};
     for (const [restaurantId, acc] of Object.entries(this.store.restaurantAccounts)) {
       output[restaurantId] = {
         username: acc.username,
         updatedAt: acc.updatedAt,
+        passwordUpdatedBy: acc.passwordUpdatedBy ?? 'app_owner',
       };
     }
     return output;
@@ -302,7 +323,7 @@ export class AuthManager {
     username: string;
     password?: string;
   }):
-    | { ok: true; account: { restaurantId: string; username: string; updatedAt: string } }
+    | { ok: true; account: RestaurantAccountSummary & { restaurantId: string } }
     | { ok: false; status: number; error: string } {
     const restaurantId = String(input.restaurantId || '').trim();
     if (!VALID_RESTAURANT_ID.test(restaurantId)) {
@@ -362,12 +383,16 @@ export class AuthManager {
         : { salt: existing!.salt, hash: existing!.hash };
 
     const updatedAt = new Date().toISOString();
+    const passwordUpdatedBy: PasswordUpdatedBy =
+      cleanPassword.length > 0 ? 'app_owner' : existing?.passwordUpdatedBy ?? 'app_owner';
+
     this.store.restaurantAccounts[restaurantId] = {
       restaurantId,
       username: normalizedUsername,
       salt: credentials.salt,
       hash: credentials.hash,
       updatedAt,
+      passwordUpdatedBy,
     };
     this.saveStore();
 
@@ -377,6 +402,71 @@ export class AuthManager {
         restaurantId,
         username: normalizedUsername,
         updatedAt,
+        passwordUpdatedBy,
+      },
+    };
+  }
+
+  /**
+   * Allows a logged-in Restaurant Owner to update their own password.
+   * Immediately updates the shared credential store so the App Owner's dashboard stays in sync.
+   */
+  changeOwnPassword(
+    session: PortalSessionPayload,
+    currentPassword: string,
+    newPassword: string
+  ):
+    | { ok: true; account: RestaurantAccountSummary & { restaurantId: string } }
+    | { ok: false; status: number; error: string } {
+    if (session.role !== 'owner' || !session.restaurantId) {
+      return {
+        ok: false,
+        status: 403,
+        error: 'Only Restaurant Owner accounts can change their password here.',
+      };
+    }
+
+    const existing = this.store.restaurantAccounts[session.restaurantId];
+    if (!existing || existing.username !== session.username) {
+      return { ok: false, status: 404, error: 'Restaurant owner account not found.' };
+    }
+
+    const cleanCurrent = String(currentPassword || '');
+    const cleanNext = String(newPassword || '');
+    if (!verifyPassword(cleanCurrent, existing.salt, existing.hash)) {
+      return { ok: false, status: 401, error: 'Current password is incorrect.' };
+    }
+
+    if (cleanNext.length < 6 || cleanNext.length > 128) {
+      return { ok: false, status: 400, error: 'New password must be between 6 and 128 characters.' };
+    }
+
+    if (cleanNext === cleanCurrent) {
+      return {
+        ok: false,
+        status: 400,
+        error: 'New password must be different from your current password.',
+      };
+    }
+
+    const { salt, hash } = hashPassword(cleanNext);
+    const updatedAt = new Date().toISOString();
+    this.store.restaurantAccounts[session.restaurantId] = {
+      ...existing,
+      salt,
+      hash,
+      updatedAt,
+      passwordUpdatedBy: 'restaurant_owner',
+    };
+    this.saveStore();
+
+    return {
+      ok: true,
+      account: {
+        restaurantId: existing.restaurantId,
+        username: existing.username,
+        updatedAt,
+        passwordUpdatedBy: 'restaurant_owner',
       },
     };
   }

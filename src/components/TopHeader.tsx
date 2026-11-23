@@ -1,5 +1,5 @@
 import React from 'react';
-import { LogIn, LogOut, Menu, Plus, QrCode, Smartphone } from 'lucide-react';
+import { KeyRound, LogIn, LogOut, Menu, Plus, QrCode, Smartphone } from 'lucide-react';
 import { usePlatform } from '../context/PlatformContext';
 import type { UserRole, WorkspaceTab } from '../types/domain';
 
@@ -32,6 +32,7 @@ export function TopHeader({ onOpenMobileNav }: { onOpenMobileNav: () => void }) 
     activeTab,
     setActiveTab,
     setAddRestaurantModalOpen,
+    setChangePasswordModalOpen,
     portalSession,
     logoutPortal,
     setGuestPreviewMode,
@@ -132,6 +133,18 @@ export function TopHeader({ onOpenMobileNav }: { onOpenMobileNav: () => void }) 
           >
             <Smartphone className="w-3.5 h-3.5" />
             <span>Guest Menu</span>
+          </button>
+        )}
+
+        {portalSession?.role === 'owner' && (
+          <button
+            type="button"
+            onClick={() => setChangePasswordModalOpen(true)}
+            aria-label="Change password"
+            className="inline-flex items-center gap-1.5 h-9 px-3 rounded-lg border border-emerald-200 bg-emerald-50 text-xs font-semibold text-emerald-800 hover:bg-emerald-100 transition-colors whitespace-nowrap shrink-0"
+          >
+            <KeyRound className="w-3.5 h-3.5" />
+            <span className="hidden sm:inline">Change Password</span>
           </button>
         )}
 

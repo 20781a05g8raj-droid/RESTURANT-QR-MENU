@@ -13,6 +13,7 @@ import { FleetDirectory } from './components/FleetDirectory';
 import { CustomerMenuView } from './components/CustomerMenuView';
 import { AddRestaurantModal } from './components/AddRestaurantModal';
 import { EditRestaurantModal } from './components/EditRestaurantModal';
+import { ChangePasswordModal } from './components/ChangePasswordModal';
 import { PortalAuthGate } from './components/PortalAuthGate';
 
 function WorkspaceShell() {
@@ -77,6 +78,7 @@ function WorkspaceShell() {
 
       <AddRestaurantModal />
       <EditRestaurantModal />
+      <ChangePasswordModal />
     </div>
   );
 }

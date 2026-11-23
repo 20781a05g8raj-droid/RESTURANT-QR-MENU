@@ -3,6 +3,7 @@ import {
   BarChart3,
   Building2,
   ChefHat,
+  KeyRound,
   LogOut,
   Pencil,
   Plus,
@@ -46,6 +47,7 @@ export function Sidebar({ mobileOpen, onCloseMobile }: SidebarProps) {
     activeRestaurant,
     setAddRestaurantModalOpen,
     setEditingRestaurant,
+    setChangePasswordModalOpen,
     portalSession,
     logoutPortal,
   } = usePlatform();
@@ -187,28 +189,43 @@ export function Sidebar({ mobileOpen, onCloseMobile }: SidebarProps) {
 
       <div className="p-4 border-t border-slate-200 text-xs text-slate-500 space-y-2.5">
         {portalSession && (
-          <div className="flex items-center justify-between gap-2">
-            <div className="min-w-0">
-              <p className="font-semibold text-slate-800 truncate">
-                {portalSession.role === 'super_admin' ? 'App Owner' : 'Restaurant Owner'}
-              </p>
-              <p className="text-[11px] font-mono text-slate-500 truncate">
-                {portalSession.username}
-              </p>
+          <>
+            <div className="flex items-center justify-between gap-2">
+              <div className="min-w-0">
+                <p className="font-semibold text-slate-800 truncate">
+                  {portalSession.role === 'super_admin' ? 'App Owner' : 'Restaurant Owner'}
+                </p>
+                <p className="text-[11px] font-mono text-slate-500 truncate">
+                  {portalSession.username}
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  logoutPortal();
+                  onCloseMobile();
+                }}
+                aria-label="Sign out of portal"
+                title="Sign out"
+                className="p-1.5 rounded-lg border border-slate-200 text-slate-500 hover:text-red-700 hover:border-red-200 hover:bg-red-50 shrink-0"
+              >
+                <LogOut className="w-3.5 h-3.5" />
+              </button>
             </div>
-            <button
-              type="button"
-              onClick={() => {
-                logoutPortal();
-                onCloseMobile();
-              }}
-              aria-label="Sign out of portal"
-              title="Sign out"
-              className="p-1.5 rounded-lg border border-slate-200 text-slate-500 hover:text-red-700 hover:border-red-200 hover:bg-red-50 shrink-0"
-            >
-              <LogOut className="w-3.5 h-3.5" />
-            </button>
-          </div>
+            {portalSession.role === 'owner' && (
+              <button
+                type="button"
+                onClick={() => {
+                  setChangePasswordModalOpen(true);
+                  onCloseMobile();
+                }}
+                className="w-full inline-flex items-center justify-center gap-1.5 h-8 px-3 rounded-lg border border-emerald-200 bg-emerald-50 text-emerald-800 text-xs font-semibold hover:bg-emerald-100 transition-colors"
+              >
+                <KeyRound className="w-3.5 h-3.5" />
+                <span>Change My Password</span>
+              </button>
+            )}
+          </>
         )}
       </div>
     </div>

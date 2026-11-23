@@ -111,9 +111,52 @@ test('per-restaurant owner credentials isolate login to that restaurantId and su
     assert.equal(auth.login('saffron_mgr', 'RestPass#2026').ok, true);
     assert.equal(auth.login('saffron_owner', 'RestPass#2026').ok, false);
 
+    // Verify public status never leaks App Owner email
+    const status = auth.getStatus() as Record<string, unknown>;
+    assert.equal('appOwnerEmail' in status, false);
+
+    // Restaurant owner changes their own password
+    const wrongCurrent = auth.changeOwnPassword(
+      { role: 'owner', username: 'saffron_mgr', restaurantId: 'rest-saffron-courtyard' },
+      'WrongOldPass',
+      'NewOwnerPass#99'
+    );
+    assert.equal(wrongCurrent.ok, false);
+    if (!wrongCurrent.ok) assert.equal(wrongCurrent.status, 401);
+
+    const changed = auth.changeOwnPassword(
+      { role: 'owner', username: 'saffron_mgr', restaurantId: 'rest-saffron-courtyard' },
+      'RestPass#2026',
+      'NewOwnerPass#99'
+    );
+    assert.equal(changed.ok, true);
+    if (changed.ok) {
+      assert.equal(changed.account.passwordUpdatedBy, 'restaurant_owner');
+    }
+
+    // Old password stops working, new password works, and App Owner's list reflects update
+    assert.equal(auth.login('saffron_mgr', 'RestPass#2026').ok, false);
+    assert.equal(auth.login('saffron_mgr', 'NewOwnerPass#99').ok, true);
+    const ownerView = auth.listRestaurantAccounts();
+    assert.equal(ownerView['rest-saffron-courtyard']?.username, 'saffron_mgr');
+    assert.equal(ownerView['rest-saffron-courtyard']?.passwordUpdatedBy, 'restaurant_owner');
+
+    // App Owner can reset password anytime and status reflects app_owner
+    const resetByMaster = auth.upsertRestaurantAccount({
+      restaurantId: 'rest-saffron-courtyard',
+      username: 'saffron_mgr',
+      password: 'MasterReset#2026',
+    });
+    assert.equal(resetByMaster.ok, true);
+    assert.equal(
+      auth.listRestaurantAccounts()['rest-saffron-courtyard']?.passwordUpdatedBy,
+      'app_owner'
+    );
+    assert.equal(auth.login('saffron_mgr', 'MasterReset#2026').ok, true);
+
     // Delete removes account
     assert.equal(auth.deleteRestaurantAccount('rest-saffron-courtyard'), true);
-    assert.equal(auth.login('saffron_mgr', 'RestPass#2026').ok, false);
+    assert.equal(auth.login('saffron_mgr', 'MasterReset#2026').ok, false);
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }

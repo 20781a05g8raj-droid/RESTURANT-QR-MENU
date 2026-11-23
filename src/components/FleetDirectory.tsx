@@ -30,6 +30,7 @@ export function FleetDirectory() {
     setEditingRestaurant,
     deleteRestaurant,
     restaurantAccountUsernames,
+    restaurantAccountMeta,
     qrPublicOrigin,
   } = usePlatform();
 
@@ -282,6 +283,7 @@ export function FleetDirectory() {
               {paged.map((r) => {
                 const isSelected = r.id === activeRestaurant.id;
                 const ownerUser = restaurantAccountUsernames[r.id] ?? r.ownerUsername;
+                const accountMeta = restaurantAccountMeta[r.id];
                 const isConfirmingDelete = confirmDeleteId === r.id;
                 return (
                   <tr
@@ -298,10 +300,19 @@ export function FleetDirectory() {
                     </td>
                     <td className="py-3 px-4 whitespace-nowrap">
                       {ownerUser ? (
-                        <span className="inline-flex items-center gap-1.5 font-mono text-xs text-emerald-800">
-                          <KeyRound className="w-3.5 h-3.5 text-emerald-600" />
-                          <span>{ownerUser}</span>
-                        </span>
+                        <div>
+                          <span className="inline-flex items-center gap-1.5 font-mono text-xs text-emerald-800">
+                            <KeyRound className="w-3.5 h-3.5 text-emerald-600" />
+                            <span>{ownerUser}</span>
+                          </span>
+                          {accountMeta && (
+                            <p className="text-[11px] text-slate-500 mt-0.5">
+                              {accountMeta.passwordUpdatedBy === 'restaurant_owner'
+                                ? 'Password updated by owner'
+                                : 'Set by App Owner'}
+                            </p>
+                          )}
+                        </div>
                       ) : (
                         <button
                           type="button"

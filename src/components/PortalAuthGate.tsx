@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useState } from 'react';
 import { Eye, EyeOff, KeyRound, Lock, ShieldCheck, Smartphone, UtensilsCrossed } from 'lucide-react';
 import { usePlatform } from '../context/PlatformContext';
 
@@ -13,27 +13,27 @@ export function PortalAuthGate() {
     setActiveTab,
   } = usePlatform();
 
-  const isFirstRunSetup = Boolean(portalAuthStatus && !portalAuthStatus.adminConfigured);
-  const defaultOwnerEmail = portalAuthStatus?.appOwnerEmail ?? 'rajensu264@gmail.com';
+  const canActivateFirstRun = Boolean(portalAuthStatus && !portalAuthStatus.adminConfigured);
+  const [setupMode, setSetupMode] = useState(false);
 
-  const [username, setUsername] = useState(defaultOwnerEmail);
+  const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  useEffect(() => {
-    if (isFirstRunSetup && portalAuthStatus?.appOwnerEmail) {
-      setUsername(portalAuthStatus.appOwnerEmail);
-    }
-  }, [isFirstRunSetup, portalAuthStatus?.appOwnerEmail]);
+  const isSetupView = canActivateFirstRun && setupMode;
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError(null);
 
-    if (isFirstRunSetup) {
+    if (isSetupView) {
+      if (!username.trim()) {
+        setError('Please enter your App Owner email address.');
+        return;
+      }
       if (password.length < 6) {
         setError('Password must be at least 6 characters.');
         return;
@@ -86,19 +86,19 @@ export function PortalAuthGate() {
           </p>
         </div>
 
-        {/* Auth Card */}
+        {/* Auth Card — Always opens cleanly to standard Sign In (never leaks owner email) */}
         <div className="bg-white border border-slate-200 rounded-2xl p-6 sm:p-7 shadow-sm space-y-5">
-          {isFirstRunSetup ? (
+          {isSetupView ? (
             <div className="space-y-1">
               <div className="inline-flex items-center gap-1.5 text-xs font-semibold text-emerald-700">
                 <ShieldCheck className="w-4 h-4" />
                 <span>One-Time App Owner Activation</span>
               </div>
               <h2 className="text-lg font-bold text-slate-900">
-                Set Your Personal App Owner Password
+                Activate Master Account
               </h2>
               <p className="text-xs text-slate-500">
-                Activate your master account (<span className="font-mono text-slate-700">{defaultOwnerEmail}</span>) to manage all restaurants and set individual owner IDs & passwords.
+                Enter your App Owner email and master password once, or set APP_OWNER_PASSWORD in your deployment environment variables.
               </p>
             </div>
           ) : (
@@ -109,7 +109,7 @@ export function PortalAuthGate() {
               </div>
               <h2 className="text-lg font-bold text-slate-900">Sign in to TablePulse</h2>
               <p className="text-xs text-slate-500">
-                Enter your App Owner email or your assigned Restaurant Owner username & password.
+                Enter your App Owner email or your Restaurant Owner username & password.
               </p>
             </div>
           )}
@@ -129,18 +129,17 @@ export function PortalAuthGate() {
                 htmlFor="portal-username"
                 className="block text-xs font-medium text-slate-700 mb-1"
               >
-                {isFirstRunSetup ? 'App Owner Email' : 'Username / Email'}
+                {isSetupView ? 'App Owner Email' : 'Username / Email'}
               </label>
               <input
                 id="portal-username"
                 type="text"
                 autoComplete="username"
                 required
-                readOnly={isFirstRunSetup}
                 value={username}
                 onChange={(e) => setUsername(e.target.value)}
-                placeholder="rajensu264@gmail.com or restaurant_id"
-                className="w-full h-10 px-3 rounded-lg border border-slate-200 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-600 read-only:bg-slate-50 read-only:text-slate-600"
+                placeholder="Enter your email or restaurant username"
+                className="w-full h-10 px-3 rounded-lg border border-slate-200 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-600"
               />
             </div>
 
@@ -149,17 +148,17 @@ export function PortalAuthGate() {
                 htmlFor="portal-password"
                 className="block text-xs font-medium text-slate-700 mb-1"
               >
-                {isFirstRunSetup ? 'Create Master Password' : 'Password'}
+                {isSetupView ? 'Master Password' : 'Password'}
               </label>
               <div className="relative">
                 <input
                   id="portal-password"
                   type={showPassword ? 'text' : 'password'}
-                  autoComplete={isFirstRunSetup ? 'new-password' : 'current-password'}
+                  autoComplete={isSetupView ? 'new-password' : 'current-password'}
                   required
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}
-                  placeholder={isFirstRunSetup ? 'Enter your personal password' : 'Enter password'}
+                  placeholder="Enter password"
                   className="w-full h-10 pl-3 pr-10 rounded-lg border border-slate-200 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-600"
                 />
                 <button
@@ -173,7 +172,7 @@ export function PortalAuthGate() {
               </div>
             </div>
 
-            {isFirstRunSetup && (
+            {isSetupView && (
               <div>
                 <label
                   htmlFor="portal-confirm-password"
@@ -188,7 +187,7 @@ export function PortalAuthGate() {
                   required
                   value={confirmPassword}
                   onChange={(e) => setConfirmPassword(e.target.value)}
-                  placeholder="Re-enter your password"
+                  placeholder="Re-enter password to confirm"
                   className="w-full h-10 px-3 rounded-lg border border-slate-200 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-600"
                 />
               </div>
@@ -203,12 +202,30 @@ export function PortalAuthGate() {
               <span>
                 {submitting
                   ? 'Please wait...'
-                  : isFirstRunSetup
-                    ? 'Activate App Owner Account'
+                  : isSetupView
+                    ? 'Activate Master Account'
                     : 'Sign In to Dashboard'}
               </span>
             </button>
           </form>
+
+          {canActivateFirstRun && (
+            <div className="pt-2 text-center">
+              <button
+                type="button"
+                onClick={() => {
+                  setSetupMode((prev) => !prev);
+                  setError(null);
+                  setConfirmPassword('');
+                }}
+                className="text-xs font-medium text-slate-500 hover:text-emerald-700 underline underline-offset-2"
+              >
+                {isSetupView
+                  ? 'Back to Sign In'
+                  : 'First-time App Owner? Activate Master Account'}
+              </button>
+            </div>
+          )}
 
           <div className="pt-4 border-t border-slate-100 flex items-center justify-between gap-2 text-xs text-slate-500">
             <span>Scanning a table QR?</span>
@@ -219,7 +236,7 @@ export function PortalAuthGate() {
                 setActiveTab('customer_menu');
                 setGuestPreviewMode(true);
               }}
-              className="inline-flex items-center gap-1 font-semibold text-emerald-700 hover:text-emerald-800 whitespace-nowrap"
+              className="inline-flex items-center gap-1.5 font-semibold text-emerald-700 hover:text-emerald-800"
             >
               <Smartphone className="w-3.5 h-3.5" />
               <span>Open Guest QR Menu</span>

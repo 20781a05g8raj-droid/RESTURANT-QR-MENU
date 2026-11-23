@@ -12,6 +12,7 @@ export function EditRestaurantModal() {
     deleteRestaurant,
     portalSession,
     restaurantAccountUsernames,
+    restaurantAccountMeta,
     restaurants,
   } = usePlatform();
 
@@ -307,14 +308,24 @@ export function EditRestaurantModal() {
           {/* Restaurant Owner Login Credentials (Super Admin only) */}
           {isSuperAdmin && (
             <div className="border border-emerald-200 bg-emerald-50/40 rounded-xl p-4 space-y-3">
-              <div className="flex items-center gap-1.5">
-                <KeyRound className="w-4 h-4 text-emerald-700" />
-                <h4 className="text-xs font-bold text-emerald-950">
-                  Restaurant Owner Login Credentials
-                </h4>
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="flex items-center gap-1.5">
+                  <KeyRound className="w-4 h-4 text-emerald-700" />
+                  <h4 className="text-xs font-bold text-emerald-950">
+                    Restaurant Owner Login Credentials
+                  </h4>
+                </div>
+                {restaurantAccountMeta[editingRestaurant.id] && (
+                  <span className="text-[11px] font-medium text-emerald-800">
+                    {restaurantAccountMeta[editingRestaurant.id].passwordUpdatedBy ===
+                    'restaurant_owner'
+                      ? 'Password last updated by Restaurant Owner'
+                      : 'Password set by App Owner'}
+                  </span>
+                )}
               </div>
               <p className="text-[11px] text-emerald-900/80">
-                Set a unique username & password so this restaurant's owner can log in and manage only their own dashboard.
+                Set a unique username & password so this restaurant's owner can log in. They can also change their own password anytime (which syncs automatically here), and you can reset it anytime below.
               </p>
 
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">

@@ -58,9 +58,14 @@ interface PersistedState {
 }
 
 export interface PortalAuthStatus {
-  appOwnerEmail: string;
   adminConfigured: boolean;
   usesEnvPassword: boolean;
+}
+
+export interface RestaurantAccountMeta {
+  username: string;
+  updatedAt: string;
+  passwordUpdatedBy: 'app_owner' | 'restaurant_owner';
 }
 
 const STORAGE_KEY = 'tablepulse_platform_state_v2';
@@ -124,6 +129,8 @@ interface PlatformContextValue {
   setAddRestaurantModalOpen: (open: boolean) => void;
   editingRestaurant: Restaurant | null;
   setEditingRestaurant: (restaurant: Restaurant | null) => void;
+  changePasswordModalOpen: boolean;
+  setChangePasswordModalOpen: (open: boolean) => void;
   // Portal Auth (App Owner + Per-Restaurant Owner Login)
   portalSession: PortalSession | null;
   portalAuthStatus: PortalAuthStatus | null;
@@ -131,8 +138,13 @@ interface PlatformContextValue {
   guestPreviewMode: boolean;
   setGuestPreviewMode: (enabled: boolean) => void;
   restaurantAccountUsernames: Record<string, string>;
+  restaurantAccountMeta: Record<string, RestaurantAccountMeta>;
   setupAppOwner: (email: string, password: string) => Promise<{ ok: boolean; error?: string }>;
   loginPortal: (username: string, password: string) => Promise<{ ok: boolean; error?: string }>;
+  changeOwnPassword: (
+    currentPassword: string,
+    newPassword: string
+  ) => Promise<{ ok: boolean; error?: string }>;
   logoutPortal: () => void;
   qrPublicOrigin: string;
   isDevPreviewOrigin: boolean;
@@ -308,6 +320,7 @@ export function PlatformProvider({ children }: { children: React.ReactNode }) {
   const [wifiConnected, setWifiConnected] = useState<boolean>(false);
   const [addRestaurantModalOpen, setAddRestaurantModalOpen] = useState<boolean>(false);
   const [editingRestaurant, setEditingRestaurant] = useState<Restaurant | null>(null);
+  const [changePasswordModalOpen, setChangePasswordModalOpen] = useState<boolean>(false);
 
   // Portal auth state (Bearer token stored strictly in React memory, never in localStorage)
   const [authToken, setAuthToken] = useState<string | null>(null);
@@ -319,6 +332,9 @@ export function PlatformProvider({ children }: { children: React.ReactNode }) {
   });
   const [restaurantAccountUsernames, setRestaurantAccountUsernames] = useState<
     Record<string, string>
+  >({});
+  const [restaurantAccountMeta, setRestaurantAccountMeta] = useState<
+    Record<string, RestaurantAccountMeta>
   >({});
 
   const [customQrBaseUrl, setCustomQrBaseUrlState] = useState<string>(() => {
@@ -393,19 +409,27 @@ export function PlatformProvider({ children }: { children: React.ReactNode }) {
     }
   }, []);
 
-  // Load server portal auth status on mount
+  // Load server portal auth status on mount (never exposes owner email publicly)
   useEffect(() => {
     let active = true;
     fetch('/api/auth/status')
-      .then((res) => res.json())
-      .then((data: PortalAuthStatus) => {
-        if (active) setPortalAuthStatus(data);
+      .then((res) => {
+        if (!res.ok) throw new Error('Auth status unavailable');
+        return res.json();
       })
-      .catch(() => {
+      .then((data: PortalAuthStatus) => {
         if (active) {
           setPortalAuthStatus({
-            appOwnerEmail: 'rajensu264@gmail.com',
-            adminConfigured: false,
+            adminConfigured: Boolean(data.adminConfigured),
+            usesEnvPassword: Boolean(data.usesEnvPassword),
+          });
+        }
+      })
+      .catch(() => {
+        // Default to standard Sign In screen if auth status endpoint is temporarily unreachable
+        if (active) {
+          setPortalAuthStatus({
+            adminConfigured: true,
             usesEnvPassword: false,
           });
         }
@@ -425,13 +449,15 @@ export function PlatformProvider({ children }: { children: React.ReactNode }) {
       });
       if (!res.ok) return;
       const data = (await res.json()) as {
-        accounts?: Record<string, { username: string; updatedAt: string }>;
+        accounts?: Record<string, RestaurantAccountMeta>;
       };
+      const accounts = data.accounts ?? {};
       const map: Record<string, string> = {};
-      for (const [restId, info] of Object.entries(data.accounts ?? {})) {
+      for (const [restId, info] of Object.entries(accounts)) {
         map[restId] = info.username;
       }
       setRestaurantAccountUsernames(map);
+      setRestaurantAccountMeta(accounts);
       setState((prev) => ({
         ...prev,
         restaurants: prev.restaurants.map((r) =>
@@ -442,6 +468,20 @@ export function PlatformProvider({ children }: { children: React.ReactNode }) {
       // ignore fetch error
     }
   }, []);
+
+  // Refresh App Owner's synced restaurant credentials when another tab updates a password
+  useEffect(() => {
+    if (!channelRef.current || portalSession?.role !== 'super_admin' || !authToken) return;
+    const channel = channelRef.current;
+    const handleSync = (event: MessageEvent) => {
+      if (event.data?.type === 'SYNC_STATE' && event.data?.payload) {
+        setState(event.data.payload as PersistedState);
+      } else if (event.data?.type === 'ACCOUNTS_UPDATED') {
+        void fetchRestaurantAccounts(authToken);
+      }
+    };
+    channel.onmessage = handleSync;
+  }, [authToken, fetchRestaurantAccounts, portalSession?.role]);
 
   const applyAuthenticatedSession = useCallback(
     (token: string, session: PortalSession) => {
@@ -514,10 +554,46 @@ export function PlatformProvider({ children }: { children: React.ReactNode }) {
     [applyAuthenticatedSession]
   );
 
+  const changeOwnPassword = useCallback(
+    async (
+      currentPassword: string,
+      newPassword: string
+    ): Promise<{ ok: boolean; error?: string }> => {
+      if (!authToken || portalSession?.role !== 'owner') {
+        return { ok: false, error: 'Please sign in as a Restaurant Owner first.' };
+      }
+      try {
+        const res = await fetch('/api/auth/change-password', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${authToken}`,
+          },
+          body: JSON.stringify({ currentPassword, newPassword }),
+        });
+        const data = (await res.json()) as { ok?: boolean; error?: string };
+        if (!res.ok || !data.ok) {
+          return { ok: false, error: data.error || 'Could not update password.' };
+        }
+        try {
+          channelRef.current?.postMessage({ type: 'ACCOUNTS_UPDATED' });
+        } catch {
+          // ignore broadcast errors
+        }
+        return { ok: true };
+      } catch {
+        return { ok: false, error: 'Network error while updating password.' };
+      }
+    },
+    [authToken, portalSession?.role]
+  );
+
   const logoutPortal = useCallback(() => {
     setAuthToken(null);
     setPortalSession(null);
     setRestaurantAccountUsernames({});
+    setRestaurantAccountMeta({});
+    setChangePasswordModalOpen(false);
     setAddRestaurantModalOpen(false);
     setEditingRestaurant(null);
     setGuestPreviewMode(false);
@@ -1466,14 +1542,18 @@ export function PlatformProvider({ children }: { children: React.ReactNode }) {
     setAddRestaurantModalOpen,
     editingRestaurant,
     setEditingRestaurant,
+    changePasswordModalOpen,
+    setChangePasswordModalOpen,
     portalSession,
     portalAuthStatus,
     portalAuthLoading,
     guestPreviewMode,
     setGuestPreviewMode,
     restaurantAccountUsernames,
+    restaurantAccountMeta,
     setupAppOwner,
     loginPortal,
+    changeOwnPassword,
     logoutPortal,
     qrPublicOrigin: resolvedQrOrigin.origin,
     isDevPreviewOrigin: resolvedQrOrigin.isDevPreview,
