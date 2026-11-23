@@ -31,6 +31,10 @@ import { LiveVoiceOrderDrawer } from './LiveVoiceOrderDrawer';
 
 export function CustomerMenuView() {
   const {
+    user,
+    cloudSyncError,
+    handleSignIn,
+    handleRedirectSignIn,
     activeRestaurant,
     activeMenu,
     activeOrders,
@@ -773,6 +777,42 @@ export function CustomerMenuView() {
                 {formatCurrency(cartTotalAmount, activeRestaurant.currency)}
               </span>
             </div>
+
+            {user && user.emailVerified ? (
+              <p className="text-xs text-emerald-700 bg-emerald-50 border border-emerald-200 rounded-lg px-3 py-2">
+                Connected as <span className="font-mono">{user.email}</span> — your order will appear live on the restaurant kitchen screen.
+              </p>
+            ) : (
+              <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 space-y-2">
+                <p className="text-xs text-amber-900">
+                  Sign in with Google (1 tap) so your order goes live directly to{' '}
+                  <span className="font-semibold">{activeRestaurant.name}</span>&apos;s kitchen dashboard.
+                </p>
+                <div className="flex flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => void handleSignIn()}
+                    className="h-8 px-3 rounded-lg bg-slate-900 text-white text-xs font-semibold hover:bg-slate-800 transition-colors"
+                  >
+                    Sign in with Google
+                  </button>
+                  {cloudSyncError &&
+                    typeof window !== 'undefined' &&
+                    window.self === window.top && (
+                      <button
+                        type="button"
+                        onClick={() => void handleRedirectSignIn()}
+                        className="h-8 px-3 rounded-lg border border-amber-300 bg-white text-amber-900 text-xs font-semibold hover:bg-amber-100 transition-colors"
+                      >
+                        Use Redirect Sign-In
+                      </button>
+                    )}
+                </div>
+                {cloudSyncError && (
+                  <p className="text-[11px] text-red-700">{cloudSyncError}</p>
+                )}
+              </div>
+            )}
 
             <button
               type="button"

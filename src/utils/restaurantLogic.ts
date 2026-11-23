@@ -83,6 +83,7 @@ export function resolvePublicQrOrigin(
 }
 
 export interface QrRestaurantFallbackMeta {
+  restaurantId?: string;
   name?: string;
   city?: string;
   cuisine?: string;
@@ -103,6 +104,9 @@ export function buildMenuQrUrl(
   const base = origin.replace(/\/+$/, '');
   const params = new URLSearchParams();
   params.set('menu', slug);
+  if (fallbackMeta?.restaurantId) {
+    params.set('rid', fallbackMeta.restaurantId.trim().slice(0, 128));
+  }
   if (tableNumber && tableNumber > 0) {
     params.set('table', String(tableNumber));
   }
@@ -126,6 +130,7 @@ export function buildMenuQrUrl(
 
 export interface ScannedMenuParams {
   slug: string;
+  restaurantId?: string;
   tableNumber: number;
   wifiPrompt: boolean;
   name?: string;
@@ -143,8 +148,12 @@ export function parseScannedRestaurantParams(search: string): ScannedMenuParams 
     Number.isInteger(parsedTable) && parsedTable >= 1 && parsedTable <= 250
       ? parsedTable
       : 4;
+  const rawRid = params.get('rid')?.trim();
+  const restaurantId =
+    rawRid && /^[a-zA-Z0-9_-]{1,128}$/.test(rawRid) ? rawRid : undefined;
   return {
     slug: slug.slice(0, 80),
+    restaurantId,
     tableNumber,
     wifiPrompt: params.get('wifi') === '1',
     name: params.get('rn')?.trim().slice(0, 80) || undefined,

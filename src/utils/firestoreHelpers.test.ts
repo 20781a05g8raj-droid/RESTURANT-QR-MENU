@@ -132,11 +132,17 @@ test('buildFirestoreOrderFields and buildFirestoreStaffFields match strict rule 
   assert.equal(staff.restaurantOwnerId, 'owner-uid');
 });
 
-test('formatFirebaseAuthError explains Vercel unauthorized-domain clearly', () => {
+test('formatFirebaseAuthError explains Vercel unauthorized-domain and internal-error clearly', () => {
   const msg = formatFirebaseAuthError(
     { code: 'auth/unauthorized-domain', message: 'Firebase: Error (auth/unauthorized-domain).' },
     'my-app.vercel.app'
   );
   assert.match(msg, /Authorized domains/i);
   assert.match(msg, /my-app\.vercel\.app/);
+
+  const internalMsg = formatFirebaseAuthError(
+    { code: 'auth/internal-error', message: 'Firebase: Error (auth/internal-error).' },
+    'resturantqr.vercel.app'
+  );
+  assert.match(internalMsg, /third-party cookie|Redirect Sign-In/i);
 });

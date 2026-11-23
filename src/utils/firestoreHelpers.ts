@@ -248,7 +248,10 @@ export function formatFirebaseAuthError(error: unknown, currentHost?: string): s
     return 'Google sign-in popup was closed before completing.';
   }
   if (code === 'auth/popup-blocked') {
-    return 'Browser blocked the Google sign-in popup. Please allow popups for this site and try again.';
+    return 'Browser blocked the Google sign-in popup. Please allow popups for this site or use Redirect Sign-In.';
+  }
+  if (code === 'auth/internal-error' || message.includes('auth/internal-error')) {
+    return 'Google sign-in popup was blocked by browser privacy settings, third-party cookie blocking, or an ad-blocker. Try Chrome (non-Incognito) with popups/cookies enabled, or click "Use Redirect Sign-In" below.';
   }
   return message || 'Could not connect to Firebase Authentication.';
 }

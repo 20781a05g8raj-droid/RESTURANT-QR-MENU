@@ -48,6 +48,7 @@ export function QrWifiStudio() {
   }, [customQrBaseUrl]);
 
   const menuUrl = buildMenuQrUrl(qrPublicOrigin, activeRestaurant.slug, selectedTable, true, {
+    restaurantId: activeRestaurant.id,
     name: activeRestaurant.name,
     city: activeRestaurant.city,
     cuisine: activeRestaurant.cuisine,

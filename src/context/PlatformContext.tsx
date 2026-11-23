@@ -15,10 +15,12 @@ import {
 } from 'firebase/firestore';
 import {
   auth,
+  completeGoogleRedirectSignIn,
   db,
   handleFirestoreError,
   OperationType,
   signInWithGoogle,
+  signInWithGoogleRedirect,
   signOutUser,
   testFirestoreConnection,
 } from '../lib/firebase';
@@ -247,6 +249,7 @@ interface PlatformContextValue {
   updateStaffRole: (staffId: string, role: StaffRole) => void;
   // Auth
   handleSignIn: () => Promise<{ ok: boolean; error?: string }>;
+  handleRedirectSignIn: () => Promise<{ ok: boolean; error?: string }>;
   handleSignOut: () => Promise<void>;
   // Shared TTS player (gemini-3.8-flash-tts)
   speakText: (text: string, style?: string, voiceName?: string) => Promise<void>;
@@ -261,8 +264,13 @@ export function PlatformProvider({ children }: { children: React.ReactNode }) {
   const [state, setState] = useState<PersistedState>(() => {
     const base = buildInitialState();
     const scanned = parseScannedRestaurantParams(window.location.search);
-    if (scanned && !base.restaurants.some((r) => r.slug === scanned.slug)) {
-      const id = `rest-${scanned.slug}`;
+    if (
+      scanned &&
+      !base.restaurants.some(
+        (r) => r.slug === scanned.slug || (scanned.restaurantId && r.id === scanned.restaurantId)
+      )
+    ) {
+      const id = scanned.restaurantId || `rest-${scanned.slug}`;
       const now = new Date().toISOString();
       const scannedRestaurant: Restaurant = {
         id,
@@ -312,6 +320,7 @@ export function PlatformProvider({ children }: { children: React.ReactNode }) {
   const [activeRestaurantId, setActiveRestaurantId] = useState<string>(() => {
     const scanned = parseScannedRestaurantParams(window.location.search);
     if (scanned) {
+      if (scanned.restaurantId) return scanned.restaurantId;
       const initial = buildInitialState();
       const matched = initial.restaurants.find((r) => r.slug === scanned.slug);
       return matched ? matched.id : `rest-${scanned.slug}`;
@@ -654,8 +663,21 @@ export function PlatformProvider({ children }: { children: React.ReactNode }) {
     setGuestPreviewMode(false);
   }, []);
 
-  // Firebase Auth + Connection Validation
+  // Firebase Auth + Connection Validation + Redirect completion
   useEffect(() => {
+    completeGoogleRedirectSignIn()
+      .then((result) => {
+        if (result?.user) {
+          setCloudSyncSuccess(
+            `Connected to Firebase Cloud Firestore as ${result.user.email ?? 'Google User'}.`
+          );
+        }
+      })
+      .catch((error) => {
+        const host = typeof window !== 'undefined' ? window.location.host : undefined;
+        setCloudSyncError(formatFirebaseAuthError(error, host));
+      });
+
     const unsubscribe = onAuthStateChanged(auth, (firebaseUser) => {
       setUser(firebaseUser);
       setAuthReady(true);
@@ -1083,8 +1105,9 @@ export function PlatformProvider({ children }: { children: React.ReactNode }) {
     }): Promise<{ ok: boolean; restaurant?: Restaurant; error?: string }> => {
       const now = new Date().toISOString();
       const baseSlug = slugifyRestaurantName(input.name) || 'restaurant';
-      const id = `rest-${baseSlug}-${Date.now().toString(36).slice(-4)}`;
-      const slug = `${baseSlug}-${Date.now().toString(36).slice(-3)}`;
+      const suffix = Date.now().toString(36).slice(-4);
+      const slug = `${baseSlug}-${suffix}`;
+      const id = `rest-${slug}`;
 
       const cleanOwnerUser = input.ownerUsername?.trim().toLowerCase() || '';
       const cleanOwnerPass = input.ownerPassword || '';
@@ -1709,7 +1732,19 @@ export function PlatformProvider({ children }: { children: React.ReactNode }) {
         const orderPath = `restaurants/${restId}/orders/${newOrder.id}`;
         void (async () => {
           try {
-            const parentOwnerId = (await ensureRestaurantInFirestore(activeRestaurant)) ?? user.uid;
+            const restSnap = await getDoc(doc(db, 'restaurants', restId));
+            let parentOwnerId: string | null = null;
+            if (restSnap.exists()) {
+              parentOwnerId = String(restSnap.data().ownerId ?? '');
+            } else if (user.email === '20781a05g8raj@gmail.com') {
+              parentOwnerId = await ensureRestaurantInFirestore(activeRestaurant);
+            }
+            if (!parentOwnerId) {
+              setCloudSyncError(
+                'This restaurant is not synced to Cloud Firestore yet. Ask the owner to click "Sync All to Cloud DB".'
+              );
+              return;
+            }
             await setDoc(doc(db, 'restaurants', restId, 'orders', newOrder.id), {
               ...buildFirestoreOrderFields(newOrder, restId, parentOwnerId, user.uid),
               createdAt: serverTimestamp(),
@@ -2045,6 +2080,21 @@ export function PlatformProvider({ children }: { children: React.ReactNode }) {
     }
   }, []);
 
+  const handleRedirectSignIn = useCallback(async (): Promise<{ ok: boolean; error?: string }> => {
+    setCloudSyncError(null);
+    setCloudSyncSuccess(null);
+    try {
+      await signInWithGoogleRedirect();
+      return { ok: true };
+    } catch (error) {
+      const host = typeof window !== 'undefined' ? window.location.host : undefined;
+      const friendly = formatFirebaseAuthError(error, host);
+      setCloudSyncError(friendly);
+      console.error('Google Redirect Sign-In failed:', error);
+      return { ok: false, error: friendly };
+    }
+  }, []);
+
   const handleSignOut = useCallback(async () => {
     setCloudSyncError(null);
     setCloudSyncSuccess(null);
@@ -2153,6 +2203,7 @@ export function PlatformProvider({ children }: { children: React.ReactNode }) {
     toggleStaffActive,
     updateStaffRole,
     handleSignIn,
+    handleRedirectSignIn,
     handleSignOut,
     speakText,
     speakingText,

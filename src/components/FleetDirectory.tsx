@@ -31,6 +31,7 @@ export function FleetDirectory() {
     cloudSyncSuccess,
     clearCloudSyncMessages,
     handleSignIn,
+    handleRedirectSignIn,
     handleSignOut,
     syncAllToCloudDb,
     restaurants,
@@ -92,6 +93,7 @@ export function FleetDirectory() {
     const results = await Promise.all(
       sample.map(async (r) => {
         const url = buildMenuQrUrl(qrPublicOrigin, r.slug, 1, true, {
+          restaurantId: r.id,
           name: r.name,
           city: r.city,
           cuisine: r.cuisine,
@@ -115,7 +117,7 @@ export function FleetDirectory() {
             r.slug,
             1,
             true,
-            { name: r.name, city: r.city, cuisine: r.cuisine, wifiSsid: r.wifiSsid }
+            { restaurantId: r.id, name: r.name, city: r.city, cuisine: r.cuisine, wifiSsid: r.wifiSsid }
           )}"`
       )
       .join('\n');
@@ -241,17 +243,28 @@ export function FleetDirectory() {
         {cloudSyncError && (
           <div
             role="alert"
-            className="px-3.5 py-2 rounded-lg bg-red-50 border border-red-200 text-xs text-red-700 flex items-center justify-between gap-2"
+            className="px-3.5 py-2.5 rounded-lg bg-red-50 border border-red-200 text-xs text-red-700 flex flex-wrap items-center justify-between gap-2"
           >
-            <span>{cloudSyncError}</span>
-            <button
-              type="button"
-              onClick={clearCloudSyncMessages}
-              aria-label="Dismiss sync error"
-              className="p-0.5 rounded hover:bg-red-100 text-red-700 shrink-0"
-            >
-              <X className="w-3.5 h-3.5" />
-            </button>
+            <span className="flex-1 min-w-[200px]">{cloudSyncError}</span>
+            <div className="flex items-center gap-2 shrink-0">
+              {!user && typeof window !== 'undefined' && window.self === window.top && (
+                <button
+                  type="button"
+                  onClick={() => void handleRedirectSignIn()}
+                  className="px-2.5 py-1 rounded-md bg-red-700 text-white font-semibold hover:bg-red-800 whitespace-nowrap"
+                >
+                  Use Redirect Sign-In
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={clearCloudSyncMessages}
+                aria-label="Dismiss sync error"
+                className="p-0.5 rounded hover:bg-red-100 text-red-700 shrink-0"
+              >
+                <X className="w-3.5 h-3.5" />
+              </button>
+            </div>
           </div>
         )}
       </div>
